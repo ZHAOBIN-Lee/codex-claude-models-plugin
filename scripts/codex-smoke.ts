@@ -70,7 +70,9 @@ try {
   assert.equal(list.result.data[0].model, model.id);
   assert.equal(list.result.data[0].hidden, false);
 
-  const cli = child(['exec', '--skip-git-repo-check', '--json', 'Read fixture.txt and report its contents.']);
+  // This deterministic provider can request only the fixture read below. Host
+  // sandbox provisioning is outside this transport test (and varies on CI).
+  const cli = child(['exec', '--sandbox', 'danger-full-access', '--skip-git-repo-check', '--json', 'Read fixture.txt and report its contents.']);
   cli.stdin.end();
   let output = '', errors = '';
   cli.stdout.on('data', chunk => {output += chunk;});
@@ -78,7 +80,7 @@ try {
   const timer = setTimeout(() => cli.kill('SIGTERM'), 45000);
   const [code] = await once(cli, 'close'); clearTimeout(timer);
   assert.equal(code, 0, `${output}\n${errors}`);
-  assert.match(output, /CODEX_CONSUMER_OK/);
+  assert.match(output, /CODEX_CONSUMER_OK/, `Model steps: ${modelCalls}\n${output}\n${errors}`);
   assert.equal(observedToolResult, true);
   assert.equal(modelCalls, 2);
   console.log('PASS: Codex model/list exposes the Claude catalog; Codex executes a returned tool call and feeds its real result back.');

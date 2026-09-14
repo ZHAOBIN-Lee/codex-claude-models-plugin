@@ -12,7 +12,7 @@ Local verification date: September 14, 2026. Platform: macOS arm64. Claude Agent
 - Codex plugin-manifest and skill-frontmatter validation.
 - Production dependency audit: no known vulnerabilities reported at verification time.
 
-The deterministic tests do not use a Claude account and do not establish model quality or live availability. CI repeats them on Linux and macOS.
+The deterministic tests do not use a Claude account and do not establish model quality, live availability or OS sandbox enforcement. Their fixture CLI runs with its sandbox disabled because the provider can issue only a fixed read of its own fixture; platform-specific sandbox provisioning is outside this transport contract. Live file-read tests used read-only Codex permissions, and the live patch test used workspace-write. CI repeats the deterministic checks on Linux and macOS.
 
 ## Live subscription checks
 
