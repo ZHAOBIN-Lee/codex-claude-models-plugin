@@ -1,5 +1,7 @@
 # Design
 
+Historical v0.1 design. See [the v0.2 unified router](../unified-router/spec.md) for the current combined picker and startup behavior.
+
 TypeScript, Node 22+, official Claude Agent SDK, Zod validation and TOML parsing. The plugin bundles first-party adapter code; setup installs the pinned SDK in private local runtime storage rather than redistributing Anthropic binaries.
 
 The HTTP service listens on 127.0.0.1, requires a random local bearer token, rejects browser Origin headers, limits body size and concurrency, sends SSE keepalives and aborts the SDK on timeout/disconnection. It logs no request bodies. Stateless full-history requests prevent concurrent workspace/session contamination.

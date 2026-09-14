@@ -1,0 +1,132 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { once } from 'node:events';
+import type { AddressInfo } from 'node:net';
+import { bridgeServer } from '../src/server.js';
+import { openaiForwarder, forwardedResponseHeaders, ROUTER_TOKEN_HEADER } from '../src/openai.js';
+import { combinedCatalog } from '../src/catalog.js';
+import { usageFromModels } from '../src/sdk.js';
+
+const localToken = 'local-test-only';
+const auth = {[ROUTER_TOKEN_HEADER]: localToken, authorization: 'Bearer openai-test-only', 'chatgpt-account-id': 'test-account'};
+const claudeResult = {decision: {text: 'CLAUDE_RESULT', calls: []}, usage: usageFromModels({})};
+
+test('OpenAI forwarding has fixed destinations and never forwards the local token or browser cookies', async () => {
+  const bytes = Buffer.from('{ "model": "gpt-test", "input": [{"opaque":"preserve"}] }');
+  const called: string[] = [];
+  const forward = openaiForwarder((async (url, options) => {
+    called.push(String(url));
+    const headers = new Headers(options?.headers);
+    assert.equal(headers.get('authorization'), auth.authorization);
+    assert.equal(headers.get('chatgpt-account-id'), auth['chatgpt-account-id']);
+    assert.equal(headers.get(ROUTER_TOKEN_HEADER), null);
+    assert.equal(headers.get('cookie'), null);
+    assert.equal(headers.get('host'), null);
+    assert.equal(headers.get('x-codex-turn-metadata'), 'metadata');
+    assert.equal(options?.redirect, 'manual');
+    assert.deepEqual(Buffer.from(options!.body as Uint8Array), bytes);
+    return new Response('upstream');
+  }) as typeof fetch);
+  for (const route of ['/v1/responses', '/v1/responses/compact']) {
+    await forward({path: route, headers: {...auth, cookie: 'browser-secret', host: '127.0.0.1', 'x-codex-turn-metadata': 'metadata'},
+      body: bytes, signal: new AbortController().signal});
+  }
+  assert.deepEqual(called, ['https://chatgpt.com/backend-api/codex/responses', 'https://chatgpt.com/backend-api/codex/responses/compact']);
+  await assert.rejects(forward({path: 'https://evil.example/', headers: auth, body: bytes, signal: new AbortController().signal}), /Unsupported OpenAI route/);
+  assert.equal(called.length, 2);
+});
+
+test('OpenAI routing requires ChatGPT credentials and rejects redirects', async () => {
+  let calls = 0;
+  const forward = openaiForwarder((async () => {calls++; return new Response(null, {status: 307, headers: {location: 'https://evil.example/'}});}) as typeof fetch);
+  const request = {path: '/v1/responses', headers: {authorization: 'Bearer fake-api-key'}, body: Buffer.from('{}'), signal: new AbortController().signal};
+  await assert.rejects(forward(request), /ChatGPT login/); assert.equal(calls, 0);
+  await assert.rejects(forward({...request, headers: auth}), /will not forward credentials/); assert.equal(calls, 1);
+});
+
+test('forwarded headers preserve auth and limits while removing hop-by-hop and decoded-body headers', () => {
+  const headers = forwardedResponseHeaders(new Headers({'www-authenticate': 'Bearer', 'retry-after': '3',
+    connection: 'x-hop', 'x-hop': 'discard', 'set-cookie': 'discard', 'content-encoding': 'gzip', 'content-length': '42',
+    'x-codex-primary-used-percent': '20'}));
+  assert.deepEqual(headers, {'www-authenticate': 'Bearer', 'retry-after': '3', 'x-codex-primary-used-percent': '20'});
+});
+
+test('one authenticated router serves GPT passthrough, Claude decisions, and GPT compaction', {timeout: 10000}, async t => {
+  const seen: {path: string; body: string}[] = [];
+  let claudeCalls = 0;
+  const sse = 'data: {"type":"response.completed","response":{"id":"original"}}\n\n';
+  const server = bridgeServer({token: localToken, run: async request => {
+    claudeCalls++;
+    assert.equal(request.model, 'claude-sdk-haiku');
+    assert.ok(!JSON.stringify(request).includes('openai-test-only'));
+    return claudeResult;
+  }, openai: {models: new Set(['gpt-test']), forward: async request => {
+    seen.push({path: request.path, body: request.body.toString()});
+    return new Response(request.path.endsWith('/compact') ? '{"output":[{"type":"compaction","encrypted_content":"opaque"}]}' : sse,
+      {headers: {'content-type': 'text/event-stream', 'x-codex-primary-used-percent': '20'}});
+  }}});
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  t.after(() => {server.closeAllConnections(); server.close();});
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/responses`;
+  const raw = '{ "model": "gpt-test", "input": [{"type":"additional_tools"}], "tools": [{"type":"web_search"}] }';
+  const response = await fetch(url, {method: 'POST', headers: auth, body: raw});
+  assert.equal(await response.text(), sse);
+  assert.equal(response.headers.get('x-codex-primary-used-percent'), '20');
+  assert.equal(seen[0]?.body, raw);
+  assert.equal(claudeCalls, 0);
+  const claude = await fetch(url, {method: 'POST', headers: auth, body: JSON.stringify({model: 'claude-sdk-haiku', input: 'hi', stream: false})});
+  assert.equal((await claude.json()).output[0].content[0].text, 'CLAUDE_RESULT');
+  assert.equal(claudeCalls, 1);
+  assert.equal(seen.length, 1);
+  const compact = await fetch(`${url}/compact`, {method: 'POST', headers: auth, body: JSON.stringify({model: 'gpt-test', input: []})});
+  assert.equal((await compact.json()).output[0].encrypted_content, 'opaque');
+  assert.equal(seen.at(-1)?.path, '/v1/responses/compact');
+  assert.equal((await fetch(`${url}/compact`, {method: 'POST', headers: auth, body: JSON.stringify({model: 'claude-sdk-haiku', input: []})})).status, 400);
+});
+
+test('router rejects unknown models and the Claude-only credential cannot authorize GPT', {timeout: 10000}, async t => {
+  let calls = 0;
+  const server = bridgeServer({token: localToken, run: async () => {calls++; return claudeResult;},
+    openai: {models: new Set(['gpt-test']), forward: async () => {calls++; return new Response('unexpected');}}});
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  t.after(() => {server.closeAllConnections(); server.close();});
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/responses`;
+  assert.equal((await fetch(url, {method: 'POST', headers: {authorization: `Bearer ${localToken}`}, body: JSON.stringify({model: 'gpt-test'})})).status, 401);
+  assert.equal((await fetch(url, {method: 'POST', headers: auth, body: JSON.stringify({model: 'unknown'})})).status, 400);
+  assert.equal(calls, 0);
+});
+
+test('upstream authentication failures retain status, body and refresh hints', {timeout: 10000}, async t => {
+  const error = '{"error":{"code":"token_expired","message":"Sign in again"}}';
+  const server = bridgeServer({token: localToken, run: async () => claudeResult,
+    openai: {models: new Set(['gpt-test']), forward: async () => new Response(error, {status: 401, headers: {'www-authenticate': 'Bearer', 'retry-after': '1'}})}});
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  t.after(() => {server.closeAllConnections(); server.close();});
+  const response = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/responses`, {method: 'POST', headers: auth, body: '{"model":"gpt-test"}'});
+  assert.equal(response.status, 401); assert.equal(await response.text(), error);
+  assert.equal(response.headers.get('www-authenticate'), 'Bearer');
+});
+
+test('disconnecting a GPT stream aborts its upstream request', {timeout: 10000}, async t => {
+  let aborted!: () => void;
+  const cancellation = new Promise<void>(resolve => {aborted = resolve;});
+  const server = bridgeServer({token: localToken, run: async () => claudeResult,
+    openai: {models: new Set(['gpt-test']), forward: async request => new Response(new ReadableStream({start(controller) {
+      controller.enqueue(new TextEncoder().encode('data: {"type":"response.created"}\n\n'));
+      request.signal.addEventListener('abort', () => {aborted(); controller.error(new Error('cancelled'));}, {once: true});
+    }}))}});
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  t.after(() => {server.closeAllConnections(); server.close();});
+  const response = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/responses`, {method: 'POST', headers: auth, body: '{"model":"gpt-test"}'});
+  await response.body!.cancel(); await cancellation;
+});
+
+test('the combined catalog preserves OpenAI rows and selects the portable native agent runtime', () => {
+  const original = [{slug: 'gpt-visible', priority: 0, visibility: 'list', model_messages: {instructions_template: 'original'}, multi_agent_version: 'v2'},
+    {slug: 'gpt-hidden', priority: 4, visibility: 'hide', supports_image_detail_original: true}];
+  const result = combinedCatalog({models: original}, [{id: 'claude-sdk-haiku', sdkModel: 'haiku', displayName: 'Claude', description: '', efforts: []}]);
+  assert.deepEqual(result.models.slice(0, 2), original.map(m => ({...m, multi_agent_version: 'v1'})));
+  assert.ok(result.models.every(m => m.multi_agent_version === 'v1'));
+  assert.equal(result.models[2]?.slug, 'claude-sdk-haiku');
+  assert.equal(result.models[2]?.priority, 5);
+});

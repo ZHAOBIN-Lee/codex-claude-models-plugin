@@ -1,16 +1,16 @@
 {
   "name": "codex-claude-models",
-  "version": "0.1.0",
-  "description": "Select Claude models in Codex and use Claude as native subagents through the Claude Agent SDK.",
+  "version": "0.2.0+codex.20260914163200",
+  "description": "Keep GPT and Claude together in the Codex model picker with subscription routing and native mixed-model subagents.",
   "author": {
     "name": "Andrii Shafar",
     "url": "https://github.com/Reidond"
   },
   "skills": "./skills/",
   "interface": {
-    "displayName": "Claude Models for Codex",
-    "shortDescription": "Claude models and subagents through the Agent SDK",
-    "longDescription": "Adds a Claude provider mode, discovered model catalog and native Codex subagents using an existing local Claude subscription login. Codex retains tool execution and approvals. Experimental; not a mixed-provider dropdown.",
+    "displayName": "GPT + Claude for Codex",
+    "shortDescription": "One model picker for GPT and Claude subscriptions",
+    "longDescription": "Adds a permanent combined model catalog and authenticated local router. GPT uses the existing Codex ChatGPT login; Claude uses the Claude Agent SDK subscription login. Codex keeps tool execution and native v1 mixed-model subagents.",
     "developerName": "Andrii Shafar",
     "category": "Developer Tools",
     "capabilities": [
@@ -20,9 +20,9 @@
     ],
     "websiteURL": "https://github.com/Reidond/codex-claude-models-plugin",
     "defaultPrompt": [
-      "Set up Claude models in Codex.",
-      "Use Claude Sonnet as a subagent.",
-      "Switch my main tasks to the Claude model picker."
+      "Keep GPT and Claude together in my model picker.",
+      "Use Claude Sonnet as a native subagent.",
+      "Check my model router and subscription logins."
     ],
     "brandColor": "#C15F3C"
   },

@@ -1,5 +1,7 @@
 # Claude in Codex
 
+Historical v0.1 design. Its separate-provider constraints are superseded by [the v0.2 unified router](../unified-router/spec.md).
+
 The user requested a public Codex plugin that uses their Claude subscription through the Claude Agent SDK for main tasks and subagents. This is a new capability, not a measured production incident.
 
 Actors: a local Codex CLI or desktop user; Codex's model provider client; the local adapter; the user's authenticated Claude Agent SDK.

@@ -1,9 +1,16 @@
 import { createServer, type IncomingMessage } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { BridgeError, requestSchema, preparePrompt, validateDecision, type RunStep } from './contracts.js';
 import { completedResponse, completionEvents, responseEnvelope } from './adapter.js';
+import { ROUTER_TOKEN_HEADER, forwardedResponseHeaders, type ForwardOpenAI } from './openai.js';
+import { VERSION } from './version.js';
 
-export interface ServerOptions {token: string; run: RunStep; timeoutMs?: number; maxBytes?: number; concurrency?: number}
+export interface ServerOptions {
+  token: string; run: RunStep; timeoutMs?: number; maxBytes?: number; concurrency?: number;
+  openai?: {models: ReadonlySet<string>; forward: ForwardOpenAI; idleTimeoutMs?: number};
+}
 
 async function body(request: IncomingMessage, maxBytes: number) {
   if (Number(request.headers['content-length'] ?? 0) > maxBytes) {
@@ -17,7 +24,8 @@ async function body(request: IncomingMessage, maxBytes: number) {
     if (size > maxBytes) throw new BridgeError(413, 'body_limit', 'Request exceeds the bridge body limit.');
     parts.push(Buffer.from(chunk));
   }
-  try { return JSON.parse(Buffer.concat(parts).toString('utf8')) as unknown; }
+  const bytes = Buffer.concat(parts);
+  try { return {bytes, json: JSON.parse(bytes.toString('utf8')) as unknown}; }
   catch { throw new BridgeError(400, 'invalid_json', 'Request body is not valid JSON.'); }
 }
 
@@ -29,23 +37,51 @@ export function bridgeServer(options: ServerOptions) {
     let acquired = false;
     let sequence = 0;
     let base: ReturnType<typeof responseEnvelope> | undefined;
+    let forwarding = false;
     const controller = new AbortController();
     const event = (value: Record<string, unknown>) => res.write(`data: ${JSON.stringify({...value, sequence_number: sequence++})}\n\n`);
     res.on('close', () => controller.abort());
     try {
-      const supplied = Buffer.from(req.headers.authorization ?? '');
-      const expected = Buffer.from(`Bearer ${options.token}`);
-      if (req.headers.origin || supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) {
+      const equalsToken = (value: unknown, expected: string) => {
+        if (typeof value !== 'string') return false;
+        const a = Buffer.from(value), b = Buffer.from(expected);
+        return a.length === b.length && timingSafeEqual(a, b);
+      };
+      const routerAuth = equalsToken(req.headers[ROUTER_TOKEN_HEADER], options.token);
+      const legacyAuth = equalsToken(req.headers.authorization, `Bearer ${options.token}`);
+      if (req.headers.origin || (!routerAuth && !legacyAuth)) {
         throw new BridgeError(401, 'unauthorized', 'Local bridge authentication required.');
       }
       if (req.method === 'GET' && req.url === '/health') {
-        res.writeHead(200, {'content-type': 'application/json'}).end(JSON.stringify({service: 'codex-claude-models', version: '0.1.0', pid: process.pid}));
+        res.writeHead(200, {'content-type': 'application/json'}).end(JSON.stringify({service: 'codex-claude-models', version: VERSION, pid: process.pid}));
         return;
       }
-      if (req.method !== 'POST' || req.url !== '/v1/responses') throw new BridgeError(404, 'not_found', 'Endpoint not found.');
+      if (req.method !== 'POST' || !['/v1/responses', '/v1/responses/compact'].includes(req.url ?? '')) throw new BridgeError(404, 'not_found', 'Endpoint not found.');
+      if (req.headers['content-encoding'] && req.headers['content-encoding'] !== 'identity') throw new BridgeError(415, 'content_encoding', 'The router expects uncompressed JSON requests.');
       if (active >= (options.concurrency ?? 6)) throw new BridgeError(429, 'busy', 'Claude bridge concurrency limit reached.');
       acquired = true; active++;
-      const parsed = requestSchema.safeParse(await body(req, options.maxBytes ?? 8 * 1024 * 1024));
+      const payload = await body(req, options.maxBytes ?? 8 * 1024 * 1024);
+      const model = payload.json && typeof payload.json === 'object' && 'model' in payload.json ? payload.json.model : undefined;
+      if (typeof model !== 'string') throw new BridgeError(400, 'invalid_request', 'A model is required.');
+      if (options.openai?.models.has(model)) {
+        if (!routerAuth || legacyAuth) throw new BridgeError(401, 'chatgpt_login_required', 'GPT requests require router authentication and a separate Codex ChatGPT credential.');
+        forwarding = true;
+        timer = setTimeout(() => controller.abort(), options.openai.idleTimeoutMs ?? 300000);
+        const upstream = await options.openai.forward({path: req.url!, headers: req.headers, body: payload.bytes, signal: controller.signal});
+        res.writeHead(upstream.status, forwardedResponseHeaders(upstream.headers));
+        if (!upstream.body) {res.end(); return;}
+        const idle = options.openai.idleTimeoutMs ?? 300000;
+        await pipeline(Readable.fromWeb(upstream.body as import('node:stream/web').ReadableStream), async function* (source) {
+          for await (const chunk of source) {
+            clearTimeout(timer); timer = setTimeout(() => controller.abort(), idle);
+            yield chunk;
+          }
+        }, res, {signal: controller.signal});
+        return;
+      }
+      if (!model.startsWith('claude-sdk-') && options.openai) throw new BridgeError(400, 'unknown_model', 'Model is not in the installed router catalog. Run install to refresh it.');
+      if (req.url !== '/v1/responses') throw new BridgeError(400, 'unsupported_compaction', 'Claude does not support remote compaction.');
+      const parsed = requestSchema.safeParse(payload.json);
       if (!parsed.success) throw new BridgeError(400, 'invalid_request', 'Invalid Responses request.');
       const request = parsed.data;
       preparePrompt(request);
@@ -68,7 +104,8 @@ export function bridgeServer(options: ServerOptions) {
       const failure = error instanceof BridgeError ? error : new BridgeError(502, 'bridge_failed', 'Claude bridge failed. Run doctor to check the local runtime and login.');
       const details = {code: failure.code, message: failure.message};
       if (!res.destroyed) {
-        if (res.headersSent) {event({type: 'response.failed', response: {...base, status: 'failed', error: details}}); res.end();}
+        if (res.headersSent && forwarding) res.destroy();
+        else if (res.headersSent) {event({type: 'response.failed', response: {...base, status: 'failed', error: details}}); res.end();}
         else res.writeHead(failure.status, {'content-type': 'application/json'}).end(JSON.stringify({error: details}));
       }
     } finally {if (acquired) active--; clearTimeout(timer); clearInterval(heartbeat);}

@@ -1,43 +1,47 @@
 # Verification record
 
-Local verification date: September 14, 2026. Platform: macOS arm64. Claude Agent SDK: 0.3.270. Codex CLI: 0.154.0. Desktop bundled backend: 0.154.0-alpha.6.2.
+Verification date: September 14, 2026. Local platform: macOS arm64. Claude Agent SDK: 0.3.270. Codex CLI: 0.154.0. Desktop bundled backend: 0.154.0-alpha.6.2.
 
-## Automated checks
+## v0.2 combined picker
 
-- TypeScript strict typecheck.
-- 17 behavioral tests covering message/tool conversion, SDK execution isolation, subscription gating before prompt delivery, invalid/failed results, token accounting, HTTP authentication, browser origins, timeout/disconnect cancellation, request size, concurrency, install/reinstall/deactivate/uninstall and conflicts.
-- Real Codex app-server `model/list`: generated catalog is accepted and models are visible.
-- Real Codex `exec` with a deterministic provider: a returned function call causes Codex to read a generated fixture; the adapter receives the actual command output and completes the turn. Two model steps are asserted.
-- The consumer checks pass with both the standalone CLI and the desktop app's bundled backend.
-- Codex plugin-manifest and skill-frontmatter validation.
-- Production dependency audit: no known vulnerabilities reported at verification time.
+The shared provider and combined catalog replace v0.1's separate-provider limitation. GPT authentication comes from Codex's documented OpenAI proxy mode; no OpenAI credential file is read by the router. OpenAI request/response bytes are forwarded, and Claude uses the existing SDK decision adapter.
 
-The deterministic tests do not use a Claude account and do not establish model quality, live availability or OS sandbox enforcement. Their fixture CLI runs with its sandbox disabled because the provider can issue only a fixed read of its own fixture; platform-specific sandbox provisioning is outside this transport contract. Live file-read tests used read-only Codex permissions, and the live patch test used workspace-write. CI repeats the deterministic checks on Linux and macOS.
+### Automated evidence
 
-## Live subscription checks
+- Strict TypeScript checks and 28 behavioral tests cover message/tool conversion, SDK execution isolation, subscription gating before prompt delivery, errors and token accounting; local authentication, browser-origin rejection, limits and cancellation; fixed OpenAI destinations, credential isolation, status/refresh headers and compaction forwarding; catalog preservation; configuration upgrade, rollback and conflicts.
+- A real Codex consumer performs a native shell read through the Claude adapter fixture and returns the real command output to the provider.
+- A second real Codex consumer lists both model families and switches GPT → Claude → GPT within a single task. Its deterministic providers verify routing without model API calls.
+- The same consumer registers one specific startup hook through native hook metadata, verifies its execution, and checks that deactivation removes its hook/trust configuration.
+- These consumer checks run against the standalone CLI and the desktop app's bundled backend. CI repeats the credential-free checks on Linux and macOS.
+- Plugin manifest and skill validation, reproducible bundle checks and production-dependency auditing accompany release verification.
 
-The SDK reported a first-party Claude Max login. No token or account identifier is included in this repository.
+The deterministic consumers use inert credentials and a temporary workspace. Their CLI sandbox is disabled to keep OS sandbox provisioning outside the transport test. They are not evidence of live model accuracy or sandbox enforcement.
 
-1. An SDK structured-output request returned the exact requested probe string.
-2. A Codex main task using Claude Haiku returned the requested `CODEX_CLAUDE_OK` string.
-3. Claude Haiku requested a Codex shell read of a fixture, received its actual contents and answered with them.
-4. Claude Sonnet requested Codex's freeform `apply_patch` tool to create a test file, then requested a shell read to verify the exact line. Codex emitted both native file-change and command-execution events.
-5. A Claude Sonnet main task spawned one native `claude_haiku` child, waited, and reported the fixture contents returned by the child. The child's own recorded shell result contained the fixture value. The final run completed without a follow-up retry.
+### Live subscription evidence
 
-These checks verify bounded local tasks, not broad coding accuracy or production readiness. Earlier test attempts revealed SDK schema-version compatibility, Codex inter-agent payload format, and SDK-runtime-directory confusion; the final code and regression coverage address those findings.
+1. A GPT request passed through a custom loopback proxy with Codex's existing ChatGPT authentication and returned the requested exact probe string.
+2. The combined provider served independent GPT and Claude tasks without switching provider configuration.
+3. One real app-server task switched `gpt-5.6-sol` → `claude-sdk-haiku` → `gpt-5.6-sol`; all three turns returned their respective requested probe strings. Both families were visible in `model/list`.
+4. A GPT Sol parent spawned a native Claude Sonnet child. The child's actual shell results contained the fixture data; the parent waited and reported it.
+5. A Claude Sonnet parent spawned a native GPT Luna child. The child read a natural-language fixture and returned its exact sentence to the parent.
+6. After stopping the router, a new Codex task ran the specifically trusted SessionStart hook, restarted the router and completed its GPT request. No global hook-trust bypass was used.
+7. Earlier v0.1 live checks verified Claude native file reads and freeform `apply_patch` followed by a read-back check; those execution boundaries remain in place.
 
-## Confirmed host limitations
+Live probes used existing subscription logins. No provider tokens, account identifiers or raw private request captures are included in this repository.
 
-- Both tested binaries ignore `model_provider` in custom-agent files. An OpenAI parent attempting a native Claude child sends the Claude model name to OpenAI and fails. This feature is not claimed as supported.
-- Model catalog entries have no per-model provider route. The plugin supplies a separate Claude mode, not a mixed OpenAI/Claude picker.
-- The desktop backend's catalog and tool behavior were verified. The GUI picker itself was not visually verified after an app restart; restarting the user's active desktop app would interrupt the task doing the installation.
-- Only Haiku and Sonnet inference were exercised live. Other models were discovered from the SDK and included in the catalog, not live-tested.
-- Long conversations, compaction, large-scale parallel use and Windows are outside this release's verification.
+### Compatibility findings and limits
 
-## Review and rollback
+- The combined catalog deliberately uses native **v1** agents for all models. v2 cross-model tests failed on encrypted inter-agent payloads. The router does not claim to decrypt those payloads. The Claude-only profile retains v2.
+- Sonnet is the verified Claude choice for tool-using mixed delegation. Haiku repeatedly reported unavailable file tools when delegated from a GPT parent, although it passed simple main-task and same-task model-switching checks. Do not generalize Sonnet's result to every model combination.
+- Model quality is not guaranteed. One early synthetic identifier fixture was misinterpreted as a placeholder; clearer transcript formatting improved switching, and a natural-language fixture verified the reverse delegation path.
+- The desktop **backend** accepted the combined catalog and model switching. GUI refresh requires an app restart and a new task; pre-existing tasks can retain their original provider. GUI behavior is not inferred solely from CLI results.
+- Opus and Fable were discovered but not exercised live. Long-context switching, every private GPT feature, Windows, heavy concurrent use and live remote compaction were not tested. Remote-compaction forwarding has deterministic HTTP coverage.
+- Unsigned plugin hooks are restricted by current Codex. Startup uses one installer-owned user-level hook with its hash returned by Codex's `hooks/list` API. The installer trusts only that exact source/command, preserving unrelated hook configuration.
 
-Reviewed callers: `contracts` feeds `sdk` and `server`; `adapter` feeds `server`; `catalog` feeds SDK discovery and setup; `setup` feeds both entrypoints; committed plugin bundles and the skill call those entrypoints. Consumer tests check configuration-driven calls through real Codex, which a source-reference scan alone cannot prove.
+## Review and recovery
 
-Review corrections include provider-limit documentation, disabling built-in web search in Claude mode, draft-7 structured output, constraining tool names, preserving v2 inter-agent payloads, account gating before prompt delivery, cancellation and owned-file conflict checks. The runtime was restarted after changes before live verification.
+Reviewed call paths: catalog → setup → Codex model manager; setup → native hook RPC → startup helper → server; server → either fixed OpenAI forwarding or SDK decision adapter; both routes → native Codex tool execution and history. Source inspection alone is a floor, so actual consumer and live checks cover the protocol and configuration-driven boundaries.
 
-`deactivate` restores the journalled settings. `uninstall` preflights generated files before removing them. Exact config backups are retained. Review covered source, tests, plugin packaging and instructions; it did not audit the internals of Codex, Anthropic's binary or every SDK dependency.
+Review corrections included the provider-routing architecture, v1 agent compatibility, OpenAI-header isolation, fixed destinations and redirect rejection, body/stream forwarding, literal tool-result handling, specific startup trust, canonical hook source paths and preservation of unrelated configuration.
+
+`deactivate` restores owned defaults and removes owned startup settings/trust. `uninstall` also preflights generated-file contents before deletion. Exact configuration backups and the private runtime remain available. This review does not audit the internals of Codex, Anthropic's executable, or all third-party dependencies.

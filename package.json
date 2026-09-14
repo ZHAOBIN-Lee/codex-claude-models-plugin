@@ -1,13 +1,13 @@
 {
   "name": "codex-claude-models-plugin",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Claude models and native Codex subagents through the Claude Agent SDK",
   "scripts": {
     "typecheck": "tsc",
     "test": "tsx --test test/*.test.ts",
     "build": "node scripts/build.mjs",
     "check": "npm run typecheck && npm test && npm run build",
-    "test:codex": "tsx scripts/codex-smoke.ts"
+    "test:codex": "tsx scripts/codex-smoke.ts && tsx scripts/router-smoke.ts"
   },
   "keywords": [],
   "author": "Andrii Shafar",

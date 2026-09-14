@@ -1,13 +1,14 @@
 import { query, type Options, type ModelUsage, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import { BridgeError, outputSchemaFor, preparePrompt, validateDecision, type ResponsesRequest, type RunStep, type Usage } from './contracts.js';
 import { discoverCatalog, type ClaudeModel } from './catalog.js';
+import { VERSION } from './version.js';
 
 export function subscriptionEnvironment(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const result = {...source};
   for (const key of Object.keys(result)) {
-    if (/^(ANTHROPIC_|CLAUDE_CODE_USE_|CLAUDE_CODE_OAUTH_TOKEN$|CLAUDECODE$|CLAUDE_CODE_SESSION_ID$)/.test(key)) delete result[key];
+    if (/^(ANTHROPIC_|OPENAI_|CODEX_API_KEY$|CHATGPT_ACCESS_TOKEN$|CHATGPT_AUTH_TOKEN$|CLAUDE_CODE_USE_|CLAUDE_CODE_OAUTH_TOKEN$|CLAUDECODE$|CLAUDE_CODE_SESSION_ID$)/.test(key)) delete result[key];
   }
-  result.CLAUDE_AGENT_SDK_CLIENT_APP = 'codex-claude-models/0.1.0';
+  result.CLAUDE_AGENT_SDK_CLIENT_APP = `codex-claude-models/${VERSION}`;
   return result;
 }
 

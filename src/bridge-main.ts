@@ -3,6 +3,7 @@ import path from 'node:path';
 import { locations, readState } from './setup.js';
 import { inspectSdk, sdkRunner } from './sdk.js';
 import { bridgeServer } from './server.js';
+import { openaiForwarder } from './openai.js';
 
 async function main() {
   const flag = process.argv.indexOf('--codex-home');
@@ -12,7 +13,8 @@ async function main() {
   if (process.argv[2] !== 'serve') throw new Error('Expected serve or models.');
   const state = await readState(p);
   const token = (await fs.readFile(p.token, 'utf8')).trim();
-  const server = bridgeServer({token, run: sdkRunner(cwd, state.models)});
+  const server = bridgeServer({token, run: sdkRunner(cwd, state.models),
+    ...(state.openaiModels ? {openai: {models: new Set(state.openaiModels), forward: openaiForwarder()}} : {})});
   server.on('error', error => {console.error(`Bridge listen error: ${(error as NodeJS.ErrnoException).code ?? 'unknown'}`); process.exitCode = 1;});
   server.listen(state.port, '127.0.0.1');
   for (const signal of ['SIGTERM', 'SIGINT'] as const) process.on(signal, () => {server.closeAllConnections(); server.close(); setTimeout(() => process.exit(0), 500).unref();});

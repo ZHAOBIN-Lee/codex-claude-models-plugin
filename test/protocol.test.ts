@@ -38,8 +38,14 @@ test('rejects unknown tools, malformed calls, unsupported content and missing hi
   assert.throws(() => validateDecision({text: '', calls: [{kind: 'function', name: 'functions.read_file', input: '[]'}]}, request), /arguments/);
   assert.throws(() => preparePrompt({...request, previous_response_id: 'old'}), /full conversation/);
   assert.throws(() => preparePrompt({...request, input: [{role: 'user', content: [{type: 'input_image', image_url: 'https://example.com/a.png'}]}]}), /text only/);
-  assert.throws(() => preparePrompt({...request, tools: [{type: 'web_search'}]}), /Unsupported Codex tool/);
+  assert.throws(() => preparePrompt({...request, tools: [{type: 'computer_use'}]}), /Unsupported Codex tool/);
   assert.throws(() => validateDecision({text: '', calls: []}, request), /no answer/);
+});
+
+test('Claude does not advertise OpenAI server-side search as an executable tool', () => {
+  const prepared = preparePrompt({...request, tools: [...request.tools, {type: 'web_search'}]});
+  assert.equal(prepared.tools.length, 2);
+  assert.ok(prepared.system.includes('server-side web search is unavailable'));
 });
 
 test('preserves native v2 parent and child messages as labelled conversation records', () => {
@@ -48,7 +54,7 @@ test('preserves native v2 parent and child messages as labelled conversation rec
       {type: 'encrypted_content', encrypted_content: 'Read the fixture and report back.'}]}]});
   const prompt = preparePrompt(request);
   assert.ok(prompt.prompt.includes('Read the fixture and report back.'));
-  assert.ok(prompt.prompt.includes('"author":"/root"'));
+  assert.ok(prompt.prompt.includes('"author": "/root"'));
   assert.ok(!prompt.system.includes('Read the fixture and report back.'));
 });
 
@@ -69,7 +75,7 @@ test('only exposes StructuredOutput in the SDK execution boundary', async () => 
 test('subscription environment never forwards API keys or token overrides', () => {
   const env = subscriptionEnvironment({HOME: '/home/test', PATH: '/bin', ANTHROPIC_API_KEY: 'secret',
     ANTHROPIC_AUTH_TOKEN: 'secret', ANTHROPIC_BASE_URL: 'https://example.com', CLAUDE_CODE_OAUTH_TOKEN: 'secret',
-    CLAUDE_CODE_USE_BEDROCK: '1', CLAUDE_CONFIG_DIR: '/custom/login'});
+    CLAUDE_CODE_USE_BEDROCK: '1', CLAUDE_CONFIG_DIR: '/custom/login', OPENAI_API_KEY: 'secret', CODEX_API_KEY: 'secret'});
   assert.equal(env.HOME, '/home/test');
   assert.equal(env.CLAUDE_CONFIG_DIR, '/custom/login');
   assert.ok(!Object.values(env).includes('secret'));

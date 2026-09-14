@@ -1,140 +1,133 @@
-# Claude models for Codex
+# GPT and Claude in one Codex picker
 
-A **Codex plugin** that runs Claude through the official [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk/overview), using your existing local Claude subscription login. Claude can drive a Codex task or run as a native Codex subagent. Codex executes the tools and retains its permissions and approvals.
+A Codex plugin that keeps **GPT and Claude models together in the normal model picker**. A local provider routes GPT requests through your existing Codex ChatGPT login and Claude requests through the official [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk/overview) and your local Claude subscription login.
 
-**Experimental, v0.1.0.** Model availability is discovered from your SDK account during setup, rather than hard-coded to a particular Claude generation.
+Select a different model without switching profiles or providers. Codex keeps its native tools, file changes, approvals and subagent UI. The plugin does not patch the Codex application.
 
-## What appears in Codex
+**Experimental v0.2.0.** Live GPT → Claude → GPT switching in one task and mixed native delegation were verified. See [VERIFICATION.md](VERIFICATION.md) for the exact evidence and limits.
 
-| Use | How |
-| --- | --- |
-| Claude in the CLI model picker | `codex --profile claude`, then `/model` |
-| Claude in the desktop model picker | Run `activate`, restart Codex, then choose a Claude model for a new task |
-| Claude subagents within a Claude main task | Ask for a registered role such as `claude_sonnet`, `claude_opus` or `claude_haiku` |
-| Return to your previous main-task provider | Run `deactivate`, then restart Codex |
+## Install or upgrade
 
-**Codex currently selects one provider for a task.** Its catalog entries do not carry a per-model provider. This plugin supplies a Claude provider mode and catalog; it does **not** add Claude beside OpenAI models in one automatically routed dropdown. Switching back restores your previous catalog.
-
-**Native subagents inherit the parent's provider.** Codex 0.154.0 and the tested desktop build ignore `model_provider` in custom-agent files. Claude → Claude subagents are supported; OpenAI → Claude native subagents are not. Fixing mixed-provider native delegation requires a Codex change, beyond a plugin. The [Codex role implementation](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/core/src/agent/role.rs) defines the actual override subset; putting an unsupported field in TOML does not enable it.
-
-The plugin does not modify Codex application binaries or intercept OpenAI authentication.
-
-## Install
-
-Requirements: macOS or Linux, Node.js 22+, npm, Codex CLI 0.154.0 or compatible desktop Codex, and an authenticated Claude subscription account. The CLI profile syntax below targets Codex 0.154.0.
-
-Authenticate through Claude's own CLI:
+Requirements: macOS or Linux, Node.js 22+, npm, Codex CLI 0.154.0 or a compatible desktop build, a Codex ChatGPT login, and a Claude subscription login.
 
 ```sh
+codex login
 claude auth login
-```
 
-Add the repository as a Codex marketplace and install its plugin:
-
-```sh
 codex plugin marketplace add https://github.com/Reidond/codex-claude-models-plugin.git
 codex plugin add codex-claude-models@personal
 ```
 
-This repository uses the scaffold's `personal` marketplace name. If you already have a different marketplace with that name, use the clone-based setup below instead of replacing your marketplace.
-
-In a fresh Codex task, ask:
-
-```text
-Use $claude-models to set up Claude models and subagents.
-```
-
-The skill runs the setup bundle from the installed plugin. You can also run it yourself using the plugin path shown by `codex plugin list`:
+For an existing installation:
 
 ```sh
-node /path/to/codex-claude-models/bin/setup.mjs install
-node /path/to/codex-claude-models/bin/setup.mjs doctor
+codex plugin marketplace upgrade personal
+codex plugin add codex-claude-models@personal
 ```
 
-Or set up from a clone without adding a marketplace:
+The repository uses the scaffold's `personal` marketplace name. If another marketplace already uses that name, use a clone rather than replacing it:
 
 ```sh
 git clone https://github.com/Reidond/codex-claude-models-plugin.git
 cd codex-claude-models-plugin
 node plugins/codex-claude-models/bin/setup.mjs install
+node plugins/codex-claude-models/bin/setup.mjs activate-router
 ```
 
-The committed adapter bundles do not need a source build. Setup installs the pinned Agent SDK dependency in private local runtime storage using `npm ci`, discovers available models, and adds provider configuration, a CLI profile, and native custom-agent files. It leaves your main-task provider unchanged until you activate Claude.
-
-## Main tasks and subagents
-
-CLI:
-
-```sh
-codex --profile claude
-# An explicit discovered model can also be selected:
-codex --profile claude --model claude-sdk-sonnet
-```
-
-Desktop:
-
-```sh
-node /path/to/codex-claude-models/bin/setup.mjs activate --model sonnet
-```
-
-Restart Codex and start a new task. Its picker uses the Claude catalog. Existing tasks may retain their previous provider; restart/new-task is the reliable reload boundary. The adapter uses a conservative 128K input budget, even when the SDK's model label advertises a larger context window.
-
-For native delegation, start a main task with the Claude profile or activated Claude provider, then ask:
+With the plugin installed, ask Codex:
 
 ```text
-Use claude_sonnet to review the authentication changes. Give it a bounded task and compare its findings with yours.
+Use $claude-models to install and activate the combined GPT and Claude picker.
 ```
 
-The available roles depend on the discovered models; `doctor` lists model IDs, and installed role files are under `$CODEX_HOME/agents/`. No background Claude filesystem agent is hidden behind a text answer: Claude returns tool requests that Codex executes and displays.
-
-## Authentication and subscription limits
-
-The Agent SDK reads your own existing Claude login. Every model step checks for a first-party subscription account **before releasing the prompt for inference**. The bridge removes API-key, bearer-token and cloud-provider overrides from its child environment. It never extracts OAuth credentials, offers a replacement login flow, or falls back to paid API keys.
-
-Anthropic's [June 15 update](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan) says its proposed billing change is paused and Agent SDK, `claude -p`, and third-party usage still draw from subscription limits. However, the [SDK overview](https://code.claude.com/docs/en/agent-sdk/overview) separately says third-party developers need approval to offer claude.ai login/rate limits for their products. These are distinct, partly conflicting notices, checked September 14, 2026. Technical compatibility is not Anthropic approval; this project claims none. Check the current terms before distributing a product or relying on a particular billing arrangement.
-
-Ordinary subscription limits and any extra-usage settings on your Claude account still apply. The plugin does not alter them. Do not expose the local bridge as a shared subscription service.
-
-## Architecture and limits
-
-```text
-Codex model picker / native custom agent
-  -> authenticated loopback Responses adapter
-  -> Claude Agent SDK, using the local Claude login
-  -> structured text + Codex tool-call decision
-  -> Codex executes tools under its own permissions
-  -> next model step receives the tool results
-```
-
-The adapter asks the SDK for a JSON structured decision rather than emulating Anthropic's private API. SDK execution tools are disabled (`tools: []`), local settings and MCP configuration are isolated, and a hook denies tools other than the SDK's internal structured-output tool. Conversation instructions, roles and tool results are retained. The SDK cannot independently run shell/file/MCP/subagent tools around Codex's approvals.
-
-Current limits:
-
-- Text input, function calls and custom/freeform tool calls are supported. Images, audio, remote compaction, Codex output-schema mode and server-stored response IDs are rejected.
-- A model step is buffered until its structured decision is complete, then emitted as Responses SSE. It is not token-by-token Claude streaming and has more latency than a direct model API.
-- Codex's built-in server-side web search is disabled in the Claude profile and activated mode. Subagents inherit that setting. Compatible function-based tools remain available.
-- The service binds only to `127.0.0.1`, requires a random local bearer token, rejects browser Origin headers, caps requests at 8 MiB and 6 concurrent steps, and aborts each step after 180 seconds or client disconnection. It performs no adapter-level retries.
-- Unsupported protocol features fail explicitly. New Codex or SDK releases may require compatibility changes.
-
-## Configuration, upgrades and removal
-
-Private state is stored in `$CODEX_HOME/claude-models` (normally `~/.codex/claude-models`). The local bearer token only authenticates the loopback bridge; it is not a Claude credential. The provider's token command starts the bridge on demand, so no login-item or session hook is required.
-
-All setup commands accept `--codex-home PATH`. `install` accepts `--port PORT` (default `47832`). Run upgrades from the latest plugin's `bin/setup.mjs`, not the copied internal helper.
+Or run the bundled setup from the installed path reported by `codex plugin list`:
 
 ```sh
-node /path/to/codex-claude-models/bin/setup.mjs install    # refresh dependencies and models
+node /path/to/codex-claude-models/bin/setup.mjs install
+node /path/to/codex-claude-models/bin/setup.mjs activate-router
 node /path/to/codex-claude-models/bin/setup.mjs doctor
-node /path/to/codex-claude-models/bin/setup.mjs stop
+```
+
+**Restart Codex and start a new task once after activation.** Both model families then remain in the picker. Your current default model is preserved. Tasks created before activation can retain their original provider; selecting Claude in one of those old tasks does not retroactively reroute it.
+
+Setup discovers Claude models from the SDK and merges them with your configured or cached OpenAI catalog, falling back to Codex's bundled catalog. It preserves model names, visibility and capabilities, with one deliberate compatibility change: the combined catalog uses native **v1 subagents** for both families. Run `install` again to refresh model availability; a catalog entry does not guarantee your account has access to that model.
+
+## Native subagents
+
+In a new task using the combined router, ask for a Claude role:
+
+```text
+Use claude_sonnet as a native subagent to review these changes. Give it a bounded task, wait for it, and compare its findings with yours.
+```
+
+A Claude parent can also choose a GPT model for a native subagent. Use the model and fork options advertised by your Codex version. Start cross-model children without a full-history fork; Codex requires full-history forks to inherit their parent's role/model settings.
+
+**Why v1?** Codex's v2 inter-agent messages can contain OpenAI-encrypted payloads. Claude cannot decrypt those, and GPT cannot decode Claude text mislabeled as encrypted content. Native v1 messages support the mixed-provider boundary. Version 0.2 therefore selects v1 in the combined catalog; the separate Claude-only profile retains v2.
+
+Sonnet is the verified choice for tool-using mixed delegation. Haiku passed main-task and model-switching checks, but repeatedly reported unavailable tools in GPT-parent delegation tests. That limitation is recorded rather than presented as a fully passing combination.
+
+## How routing works
+
+```text
+Normal Codex model picker: GPT / Claude
+  -> one authenticated loopback provider
+     -> GPT: forward Responses bytes and SSE to OpenAI
+     -> Claude: Claude Agent SDK produces a Codex decision
+  -> Codex executes tools and displays results
+```
+
+The router uses Codex's documented [`requires_openai_auth` proxy mode](https://learn.chatgpt.com/docs/auth#alternative-model-providers). Codex supplies its current OpenAI authorization headers; this plugin does not read OpenAI credential files. GPT requests go only to fixed official ChatGPT Codex endpoints. Redirects are rejected. Status codes, auth-refresh hints, rate-limit headers, streamed events and remote-compaction responses are retained.
+
+Local access requires a separate random `X-Codex-Router-Token`, which is never forwarded upstream. Browser cookies are not forwarded. OpenAI headers are never supplied to the Claude adapter, and OpenAI credential environment variables are removed from the SDK subprocess environment. The service logs no prompts or credentials.
+
+For Claude, SDK execution tools are disabled. The adapter requests a structured decision containing text and Codex function/custom tool calls; Codex executes those calls under its own permissions. The SDK checks the local subscription account before receiving the prompt and never falls back to API keys.
+
+## Startup and configuration
+
+State lives under `$CODEX_HOME/claude-models`, normally `~/.codex/claude-models`. Setup downloads the pinned Agent SDK there; Anthropic binaries are not redistributed in this repository.
+
+`activate-router` registers one user-level SessionStart command that starts the local router on demand. It asks Codex for that exact command's native hook metadata and trusts only its returned hash. It does not use a global hook-trust bypass. This is user-level configuration because current Codex builds restrict unsigned plugin hooks. The command includes the explicit Codex home, so custom homes work correctly.
+
+Configuration changes are backed up byte-for-byte. Parsed unrelated settings are preserved, though TOML formatting/comments may change. The installer records its providers, catalogs, agent files, selected settings and startup-hook trust so it can restore them. It refuses conflicting provider or generated-file edits. Removing a hook can leave an empty group to avoid renumbering later hooks and invalidating their trust.
+
+All commands accept `--codex-home PATH`. `install` accepts `--port PORT` (default `47832`); `activate-router` accepts `--model MODEL_ID` if you explicitly want to change the default.
+
+```sh
+node /path/to/codex-claude-models/bin/setup.mjs doctor
 node /path/to/codex-claude-models/bin/setup.mjs start
+node /path/to/codex-claude-models/bin/setup.mjs stop
 node /path/to/codex-claude-models/bin/setup.mjs deactivate
 node /path/to/codex-claude-models/bin/setup.mjs uninstall
 codex plugin remove codex-claude-models@personal
 ```
 
-Config changes preserve parsed TOML values and create exact byte backups; formatting and comments can change in the active file. Activation journals the previous model, provider, catalog, web-search and default-subagent-model settings. Deactivation restores those values while preserving unrelated changes. Edited generated files or provider conflicts are rejected. Uninstall stops the bridge and removes only its unchanged generated configuration and agent files. It retains private runtime files and backups for recovery.
+`deactivate` restores the previous provider/catalog/default and removes the owned startup hook/trust. `uninstall` also removes unchanged generated providers, catalogs and agents; private runtime files and backups remain available for recovery. Run setup upgrades from the latest plugin bundle.
 
-## Development and verification
+The older Claude-only mode remains available for users who do not want the combined router:
+
+```sh
+codex --profile claude
+# Optional Claude-only desktop default:
+node /path/to/codex-claude-models/bin/setup.mjs activate --model sonnet
+```
+
+## Limits
+
+- The combined router requires ChatGPT login for GPT. It is not an API-key proxy or a router for other custom providers.
+- GPT uses SSE through the proxy; WebSocket transport is disabled. This is not a promise of parity with every private Codex backend feature.
+- Claude accepts text and Codex function/custom tools. Images, audio, Codex output-schema mode, server-stored response IDs and remote compaction are unsupported on the Claude route.
+- OpenAI server-side web search remains available on the GPT route. Its tool definition is omitted for Claude; compatible Codex-executed browser/search functions can still be used when present.
+- Claude responses are buffered until a structured decision completes. GPT streams are forwarded as received.
+- The bridge binds only to `127.0.0.1`, rejects browser Origin headers, caps request bodies at 8 MiB and inference at 6 concurrent requests. Claude steps time out after 180 seconds; OpenAI forwarding has a 300-second idle timeout. Client disconnection cancels the corresponding request.
+- No adapter-level retries or remote shared-subscription hosting. Codex/SDK releases, authentication behavior and subscription entitlements can change.
+
+## Subscription terms
+
+Anthropic's [June 15 update](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan) says its proposed billing change is paused and SDK/noninteractive usage still draws from subscription limits. Its [SDK overview](https://code.claude.com/docs/en/agent-sdk/overview) separately restricts third-party products offering claude.ai login/rate limits without approval. These notices were checked September 14, 2026; technical compatibility is not Anthropic approval, and this project claims none.
+
+Existing account limits and any extra-usage settings still apply. The plugin does not change them or implement a replacement login flow.
+
+## Development
 
 ```sh
 npm ci
@@ -142,6 +135,6 @@ npm run check
 npm run test:codex
 ```
 
-Tests exercise HTTP authentication, cancellation/timeouts, invalid structured output, configuration lifecycle and real Codex protocol consumption. `test:codex` starts a real pinned Codex app-server, checks `model/list`, and runs a Codex file-read tool round trip against a deterministic provider fixture. It does not require either subscription or make model API requests. Live Claude checks are separate and are recorded in [VERIFICATION.md](VERIFICATION.md).
+Tests cover routing/credential isolation, forwarding/error/cancellation behavior, SDK decisions, configuration migration/rollback, and real Codex protocol consumption. The consumer tests use deterministic providers and inert credentials: they verify native tool execution and switching GPT → Claude → GPT in one task without making model API requests. Live subscription and delegation checks are separate.
 
-CI runs on macOS and Linux and verifies that committed plugin bundles reproduce from source. This repository's adapter code is MIT licensed. The Agent SDK is downloaded separately and remains subject to Anthropic's own license and terms.
+CI runs on macOS and Linux and checks reproducible plugin bundles. Adapter source is MIT licensed; bundled library notices are included, and the separately downloaded Claude SDK retains its own license and terms.
