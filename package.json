@@ -1,0 +1,30 @@
+{
+  "name": "codex-claude-models-plugin",
+  "version": "0.1.0",
+  "description": "Claude models and native Codex subagents through the Claude Agent SDK",
+  "scripts": {
+    "typecheck": "tsc",
+    "test": "tsx --test test/*.test.ts",
+    "build": "node scripts/build.mjs",
+    "check": "npm run typecheck && npm test && npm run build",
+    "test:codex": "tsx scripts/codex-smoke.ts"
+  },
+  "keywords": [],
+  "author": "Andrii Shafar",
+  "license": "MIT",
+  "type": "module",
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.270",
+    "@iarna/toml": "2.2.5",
+    "zod": "4.3.6"
+  },
+  "devDependencies": {
+    "@openai/codex": "0.154.0",
+    "@types/iarna__toml": "2.0.5",
+    "@types/node": "26.5.1",
+    "esbuild": "0.28.2",
+    "tsx": "4.23.13",
+    "typescript": "7.0.2"
+  },
+  "private": true
+}

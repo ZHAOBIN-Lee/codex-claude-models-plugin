@@ -1,0 +1,39 @@
+{
+  "name": "codex-claude-models",
+  "version": "0.1.0",
+  "description": "Select Claude models in Codex and use Claude as native subagents through the Claude Agent SDK.",
+  "author": {
+    "name": "Andrii Shafar",
+    "url": "https://github.com/Reidond"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Claude Models for Codex",
+    "shortDescription": "Claude models and subagents through the Agent SDK",
+    "longDescription": "Adds a Claude provider mode, discovered model catalog and native Codex subagents using an existing local Claude subscription login. Codex retains tool execution and approvals. Experimental; not a mixed-provider dropdown.",
+    "developerName": "Andrii Shafar",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/Reidond/codex-claude-models-plugin",
+    "defaultPrompt": [
+      "Set up Claude models in Codex.",
+      "Use Claude Sonnet as a subagent.",
+      "Switch my main tasks to the Claude model picker."
+    ],
+    "brandColor": "#C15F3C"
+  },
+  "repository": "https://github.com/Reidond/codex-claude-models-plugin",
+  "homepage": "https://github.com/Reidond/codex-claude-models-plugin#readme",
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "claude",
+    "agent-sdk",
+    "model-provider",
+    "subagents"
+  ]
+}
