@@ -1,2 +1,2 @@
-plugins/codex-claude-models/bin/* linguist-generated=true
+plugins/codex-claude-models/bin/* linguist-generated=true -whitespace
 **/package-lock.json linguist-generated=true

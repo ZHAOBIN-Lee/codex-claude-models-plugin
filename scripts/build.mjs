@@ -8,4 +8,4 @@ await build({entryPoints: {'setup': 'src/setup-main.ts', 'bridge': 'src/bridge-m
 await fs.copyFile('LICENSE', 'plugins/codex-claude-models/LICENSE');
 const notices = await Promise.all(['zod', '@iarna/toml'].map(async name =>
   `${name}\n${await fs.readFile(`node_modules/${name}/LICENSE`, 'utf8')}`));
-await fs.writeFile('plugins/codex-claude-models/THIRD_PARTY_NOTICES.txt', notices.join('\n\n'));
+await fs.writeFile('plugins/codex-claude-models/THIRD_PARTY_NOTICES.txt', `${notices.join('\n\n').trimEnd()}\n`);
