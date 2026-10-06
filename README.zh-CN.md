@@ -17,7 +17,7 @@
 - **长步骤。** 只有连续 180 秒没有模型活动（压缩为 300 秒），或单步超过 15 分钟，才判为超时。心跳是真实的 SSE 事件，Codex 的空闲计时不会把慢但仍在进行的步骤断掉。
 - **稳健性。** 格式错误的决策、或拿不到可核实用量的流会重试一次。当前回合的图片会交给 Claude。回复语言按用户自己写的文字判断，不受 Codex 包在外面的英文内容影响。
 - **安全边界。** Claude 只通过固定的官方 CLI 运行（路径、版本和 SHA-256 都核对），要求订阅登录，没有 API 回退。每次调用都写一份私有凭证，记录实际模型和会话。
-- **安装。** 安装和回退是事务式的；`PATH` 里没有 npm 时可用 `NPM_BIN` 指定；另有脚本可以把一个已有聊天迁移到 router。
+- **安装。** 安装和回退是事务式的；`PATH` 里没有 npm 时可用 `NPM_BIN` 指定；另有脚本可以把一个或全部已有聊天迁移到 router，带备份和回退（见 [MIGRATION.zh-CN.md](MIGRATION.zh-CN.md)）。
 
 细节、配置差异和回退见 [ADAPTATION.zh-CN.md](ADAPTATION.zh-CN.md)。
 
@@ -25,12 +25,13 @@
 
 2026-10-06 至 07，macOS arm64，Codex 0.160.1，官方 Claude Code 2.1.285，Agent SDK 0.3.270，Node 24。
 
-- 194 项单元和集成测试（`npm test`）。
+- 195 项单元和集成测试（`npm test`）。
 - 通过无界面的 `codex exec` 使用真实 Claude 订阅：
   - 强制压缩一次：Sonnet 压缩 423,417 Token 用了 7.7 秒，之后聊天能正确回忆前面的输出。
   - 同一个聊天从 Claude 切到 GPT，临时 catalog 把 GPT 窗口调到 4 万：先由 Sonnet 压缩，GPT 再根据前面的历史作答。
   - 混合子代理，各执行一条命令：Claude 聊天派出 GPT 子代理，GPT 聊天派出 `claude_sonnet`。
-- 在桌面 App 里日常使用，包括一个迁移到 router 的旧聊天。这是维护者自己的使用，不是正式验收。
+- 在桌面 App 里日常使用。这是维护者自己的使用，不是正式验收。
+- 在维护者真实的 Codex 目录上做了批量迁移：一次迁移 4,025 个 `openai` 聊天（含已归档聊天和子代理会话），用真实 Codex 冷启动抽查了 4 个聊天，之前报错的一个旧聊天随后在桌面 App 里用 Claude 正常回复。前两次尝试在抽样时失败并自动改回，两个原因都已修复并补了测试。
 
 没有核对：
 
@@ -96,7 +97,7 @@ CODEX_BIN="$REAL_CODEX" ./node_modules/.bin/tsx scripts/native-acceptance.ts --l
 只有读完 [ADAPTATION.zh-CN.md](ADAPTATION.zh-CN.md) 里的具体配置差异和回退步骤之后再做：
 
 1. 对你真实的 Codex 目录执行 `install`，再 `activate-router`。它只按精确哈希信任自己那一条启动钩子。
-2. 重启一次 Codex，开新聊天。旧聊天保留原来的 provider；`scripts/thread_migration.py` 可以一次迁移一个聊天（见 [ADAPTATION.zh-CN.md](ADAPTATION.zh-CN.md)）。
+2. 重启一次 Codex，开新聊天。旧聊天保留原来的 provider，在里面选 Claude 会报 “not supported when using Codex with a ChatGPT account”。迁移方法见 [MIGRATION.zh-CN.md](MIGRATION.zh-CN.md)。
 3. 你原来的 GPT 默认模型保持不变。`deactivate` 和 `uninstall` 会撤销它自己加的改动。
 
 ## 使用时要知道

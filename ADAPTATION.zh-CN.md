@@ -43,7 +43,7 @@ Claude 的决策直接交给 Codex，由 Codex 执行并显示真实的工具调
 
 macOS arm64，Codex 0.160.1，官方 Claude Code 2.1.285，Agent SDK 0.3.270。
 
-- 194 项测试通过，类型检查和构建通过。设置 `NPM_BIN` 后，安装运行时的测试也能跑。
+- 195 项测试通过，类型检查和构建通过。设置 `NPM_BIN` 后，安装运行时的测试也能跑。
 - 目录里每个 Claude 模型的窗口都取自 SDK 最终结果（100 万或 20 万）。没核实过或带后缀的 ID 按 20 万处理。
 - 真实 Sonnet 强制压缩：423,417 输入 Token 用 7.7 秒完成摘要，凭证记为 `request_kind: compaction`，之后回忆正确。
 - 同一聊天从 Claude 切到 GPT，临时 catalog 把 GPT 窗口调到 4 万：Codex 的 `ModelDownshift` 压缩在 Sonnet 上执行（70,379 Token，5.9 秒），GPT 再根据摘要作答。
@@ -77,7 +77,7 @@ macOS arm64，Codex 0.160.1，官方 Claude Code 2.1.285，Agent SDK 0.3.270。
 
 1. **先准备政策文件**：`<CODEX_HOME>/claude-models/runtime-policy.json`（权限 600）。CLI 路径、版本、SHA-256 从真实文件里取。你已经确认过的信息，比如额外用量已关闭及日期，可以直接填，不会为同一件事再问你。这个文件只记录你的声明，不是实时账单核查。
 2. 依次执行 `install`、`activate-router`、`doctor`，`CODEX_BIN` 指向你实际使用的 Codex。先在一个单独的目录里试。
-3. 重启一次 Codex，开新聊天。旧聊天保留原来的 provider。要迁移某个聊天，先完全退出 Codex，再看 `python3 scripts/thread_migration.py --help`；它会保留备份清单，方便回退。
+3. 重启一次 Codex，开新聊天。旧聊天保留原来的 provider。要迁移一个或全部旧聊天，按 [MIGRATION.zh-CN.md](MIGRATION.zh-CN.md) 操作；两个脚本都会保留备份清单，方便回退。
 
 `config.toml` 里应出现的键（只有占位符，你的值会不同）。设置工具会重新序列化这个文件，格式和注释可能变；解析后的无关字段保留，但字节哈希不会相同。
 

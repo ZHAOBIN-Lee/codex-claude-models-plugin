@@ -17,7 +17,7 @@ This is a modified version of [Reidond/codex-claude-models-plugin](https://githu
 - **Long steps.** A step fails only after 180 s without model activity (300 s for compaction) or at a 15 minute cap. Heartbeats are real SSE events, so Codex's idle timer does not cut off a slow step.
 - **Robustness.** A malformed decision or a stream without verifiable usage is retried once. Images in the current turn are passed to Claude. Replies follow the language of the user's own words, not the English context Codex wraps around them.
 - **Guard rails.** Claude runs only through a pinned official CLI (path, version and SHA-256), with a subscription login and no API fallback. Every attempt writes a private receipt with the actual model and session.
-- **Install.** Transactional install and rollback, `NPM_BIN` for machines without npm on `PATH`, and a script that moves one existing chat to the router.
+- **Install.** Transactional install and rollback, `NPM_BIN` for machines without npm on `PATH`, and scripts that move one or all existing chats to the router, with backup and rollback ([MIGRATION.md](MIGRATION.md)).
 
 Details, config diff and rollback: [ADAPTATION.md](ADAPTATION.md).
 
@@ -25,12 +25,13 @@ Details, config diff and rollback: [ADAPTATION.md](ADAPTATION.md).
 
 2026-10-06 and 07, macOS arm64, Codex 0.160.1, official Claude Code 2.1.285, Agent SDK 0.3.270, Node 24.
 
-- 194 unit and integration tests (`npm test`).
+- 195 unit and integration tests (`npm test`).
 - Real Claude subscription through headless `codex exec`:
   - A forced compaction: Sonnet summarised 423,417 tokens in 7.7 s and the chat recalled earlier output afterwards.
   - Claude to GPT in one chat, with GPT's window lowered to 40k in a temporary catalog: Sonnet compacted first, then GPT answered from the earlier history.
   - Mixed sub-agents, one shell command each: a Claude chat spawned a GPT sub-agent, and a GPT chat spawned `claude_sonnet`.
-- Daily use in the desktop app, including one old chat migrated to the router. This is the maintainer's own use, not a formal acceptance.
+- Daily use in the desktop app. This is the maintainer's own use, not a formal acceptance.
+- Batch migration on the maintainer's real Codex home: 4,025 `openai` chats (including archived chats and sub-agent sessions) moved in one run, 4 sampled chats cold-resumed through the real Codex, and a previously failing old chat then answered with Claude in the desktop app. Two earlier attempts failed on sampling and reverted themselves; both causes are fixed and covered by tests.
 
 Not checked:
 
@@ -96,7 +97,7 @@ Cases: `readwrite`, `cancel`, `readonly`, `compact`, `history`. The report is mo
 Do this only after you've read the concrete config diff and rollback steps in [ADAPTATION.md](ADAPTATION.md):
 
 1. `install`, then `activate-router`, against your real Codex home. It trusts only its own startup hook, by exact hash.
-2. Restart Codex once and start a new chat. Old chats keep their original provider; `scripts/thread_migration.py` can move one chat at a time (see [ADAPTATION.md](ADAPTATION.md)).
+2. Restart Codex once and start a new chat. Old chats keep their original provider, and picking Claude in them fails with "not supported when using Codex with a ChatGPT account". To move them, see [MIGRATION.md](MIGRATION.md).
 3. Your GPT default stays as it was. `deactivate` and `uninstall` undo the owned changes.
 
 ## What to expect

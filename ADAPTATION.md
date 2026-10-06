@@ -43,7 +43,7 @@ No SDK execution tools are exposed (only the structured-output tool). Every step
 
 macOS arm64, Codex 0.160.1, official Claude Code 2.1.285, Agent SDK 0.3.270.
 
-- 194 tests pass; typecheck and build pass. With `NPM_BIN` set, the install-runtime tests run too.
+- 195 tests pass; typecheck and build pass. With `NPM_BIN` set, the install-runtime tests run too.
 - Every Claude model in the catalog had its window read from the final SDK result (1M or 200k). Unverified or suffixed IDs fall back to 200k.
 - Forced compaction on real Sonnet: 423,417 input tokens summarised in 7.7 s, receipt `request_kind: compaction`, correct recall afterwards.
 - Claude to GPT in one chat, GPT window lowered to 40k in a temporary catalog: Codex's `ModelDownshift` compaction ran on Sonnet (70,379 tokens, 5.9 s), then GPT answered from the summary.
@@ -77,7 +77,7 @@ You do this yourself, after reading the diff. Nothing global has been changed.
 
 1. **Prepare the policy first** at `<CODEX_HOME>/claude-models/runtime-policy.json` (mode 600). Fill the CLI path, version and SHA-256 from the real files. Facts you have already confirmed, such as extra usage being off with a date, can go straight in; nobody needs to ask you again for the same fact. The file records your statement and is not a live Billing check.
 2. Run `install`, then `activate-router`, then `doctor`, with `CODEX_BIN` pointing at the Codex you actually use. Try it in a separate home first.
-3. Restart Codex once and start a new chat. Old chats keep their original provider. To move one chat, fully quit Codex first and see `python3 scripts/thread_migration.py --help`; it keeps a backup manifest for rollback.
+3. Restart Codex once and start a new chat. Old chats keep their original provider. To move one or all of them, follow [MIGRATION.md](MIGRATION.md); both scripts keep a backup manifest for rollback.
 
 Expected keys in `config.toml` (placeholders only; your values will differ). Setup re-serializes the file, so formatting and comments can change. Parsed unrelated fields are preserved, but a byte hash will not match.
 
