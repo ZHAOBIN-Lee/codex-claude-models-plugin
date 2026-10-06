@@ -5,3 +5,8 @@ work/
 .DS_Store
 .env*
 !.env.example
+.ai/
+.claude/
+staged-skills/
+__pycache__/
+*.pyc

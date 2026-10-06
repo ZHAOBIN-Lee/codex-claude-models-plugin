@@ -1,5 +1,8 @@
-import { test } from 'node:test';
+import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
+import { promises as fs } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { completedResponse, completionEvents, responseEnvelope } from '../src/adapter.js';
 import { preparePrompt, requestSchema, validateDecision } from '../src/contracts.js';
 import { isolatedOptions, sdkRunner, subscriptionEnvironment, usageFromModels } from '../src/sdk.js';
@@ -37,7 +40,8 @@ test('rejects unknown tools, malformed calls, unsupported content and missing hi
   assert.throws(() => validateDecision({text: '', calls: [{kind: 'function', name: 'Bash', input: '{}'}]}, request), /not offered/);
   assert.throws(() => validateDecision({text: '', calls: [{kind: 'function', name: 'functions.read_file', input: '[]'}]}, request), /arguments/);
   assert.throws(() => preparePrompt({...request, previous_response_id: 'old'}), /full conversation/);
-  assert.throws(() => preparePrompt({...request, input: [{role: 'user', content: [{type: 'input_image', image_url: 'https://example.com/a.png'}]}]}), /text only/);
+  assert.throws(() => preparePrompt({...request, input: [{role: 'user', content: [{type: 'input_file', file_id: 'f'}]}]}), /text and images only/);
+  assert.throws(() => preparePrompt({...request, input: [{type: 'item_reference', id: 'x'}]}), /Unsupported history item/);
   assert.throws(() => preparePrompt({...request, tools: [{type: 'computer_use'}]}), /Unsupported Codex tool/);
   assert.throws(() => validateDecision({text: '', calls: []}, request), /no answer/);
 });
@@ -90,19 +94,37 @@ test('uses actual SDK token totals including caches', () => {
   assert.equal(usage.input_tokens_details.cached_tokens, 30);
 });
 
-test('failed and incomplete SDK runs cannot become successful text', async () => {
+// These fake-SDK tests exercise the runner only. Production always runs the real policy check; here the guard is
+// injected through the module test API with a private temporary receipts directory.
+const injected = async (t: TestContext) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-protocol-'));
+  t.after(() => fs.rm(dir, {recursive: true, force: true}));
+  return {receiptsDir: path.join(dir, 'receipts'), guard: async () => ({coverage: 'test_injected'})};
+};
+
+test('production runner without a policy is fail-closed and never creates a query', async () => {
+  let created = 0;
+  const fake = (() => {created++; throw new Error('must not be created');}) as unknown as typeof query;
+  const model = {id: request.model, sdkModel: 'haiku', displayName: 'Haiku', description: '', efforts: []};
+  await assert.rejects(sdkRunner('/tmp', [model], fake)(request, new AbortController().signal), /runtime policy is required/);
+  assert.equal(created, 0);
+});
+
+test('failed and incomplete SDK runs cannot become successful text', async t => {
+  const runtime = await injected(t);
   let closed = 0;
   const fake = (messages: unknown[]) => (() => Object.assign((async function* () {
     for (const message of messages) yield message as SDKMessage;
   })(), {close() {closed++;}, async accountInfo() {return {apiProvider: 'firstParty', subscriptionType: 'Claude Max'};}})) as unknown as typeof query;
   const model = {id: request.model, sdkModel: 'haiku', displayName: 'Haiku', description: '', efforts: []};
   await assert.rejects(sdkRunner('/tmp', [model], fake([{type: 'result', subtype: 'success', is_error: true,
-    result: 'Rate limited'}]))(request, new AbortController().signal), /did not complete/);
-  await assert.rejects(sdkRunner('/tmp', [model], fake([]))(request, new AbortController().signal), /without a result/);
-  assert.equal(closed, 2);
+    result: 'Rate limited'}]), runtime)(request, new AbortController().signal), /did not complete/);
+  await assert.rejects(sdkRunner('/tmp', [model], fake([]), runtime)(request, new AbortController().signal), /without a result/);
+  assert.equal(closed, 2, 'each query is closed exactly once');
 });
 
-test('no prompt reaches inference when the account is not a subscription', async () => {
+test('no prompt reaches inference when the account is not a subscription', async t => {
+  const runtime = await injected(t);
   let delivered: Promise<IteratorResult<unknown>> | undefined;
   const fake = ((params: Parameters<typeof query>[0]) => {
     assert.notEqual(typeof params.prompt, 'string');
@@ -110,7 +132,7 @@ test('no prompt reaches inference when the account is not a subscription', async
     return Object.assign((async function* () {})(), {close() {}, async accountInfo() {return {apiProvider: 'firstParty'};}});
   }) as unknown as typeof query;
   const model = {id: request.model, sdkModel: 'haiku', displayName: 'Haiku', description: '', efforts: []};
-  await assert.rejects(sdkRunner('/tmp', [model], fake)(request, new AbortController().signal), /subscription login/);
+  await assert.rejects(sdkRunner('/tmp', [model], fake, runtime)(request, new AbortController().signal), /subscription login/);
   assert.equal((await delivered)!.done, true);
 });
 

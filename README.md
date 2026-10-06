@@ -1,140 +1,134 @@
-# GPT and Claude in one Codex picker
+# Claude as a native Codex model (local adaptation)
 
-A Codex plugin that keeps **GPT and Claude models together in the normal model picker**. A local provider routes GPT requests through your existing Codex ChatGPT login and Claude requests through the official [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk/overview) and your local Claude subscription login.
+[中文](README.zh-CN.md)
 
-Select a different model without switching profiles or providers. Codex keeps its native tools, file changes, approvals and subagent UI. The plugin does not patch the Codex application.
+The goal: Claude makes the decisions, Codex runs the tools, and the real tool calls show up in the main chat. A local router and SDK process sit in between, but the work stays in the main chat: Codex executes the tools and shows the real calls, with no side panel.
 
-**Experimental v0.2.0.** Live GPT → Claude → GPT switching in one task and mixed native delegation were verified. See [VERIFICATION.md](VERIFICATION.md) for the exact evidence and limits.
+**Status: local and unreleased.** Enabled on this machine, with the user confirming calls work. The first 2026-10-06 repair corrected Sonnet's context budget. The follow-up usage-accounting fix is now installed: 161 tests passed, and a real Codex app-server ran three continuous Claude turns with six native file reads and zero automatic compactions. Its reported context and cache counters matched the new receipts. This follow-up check was headless; the earlier acceptance notes below predate global activation.
 
-## Install or upgrade
+This is a local adaptation of [Reidond/codex-claude-models-plugin](https://github.com/Reidond/codex-claude-models-plugin) at commit `dd91e36f30bf5682eb78316f3ed3b0de29d12015` (MIT, Copyright (c) 2026 Andrii Shafar, see [LICENSE](LICENSE)). It is not an upstream release, and cloning upstream `main` will not give you these changes.
 
-Requirements: macOS or Linux, Node.js 22+, npm, Codex CLI 0.154.0 or a compatible desktop build, a Codex ChatGPT login, and a Claude subscription login.
+More detail: [ADAPTATION.md](ADAPTATION.md) (changes, config diff, rollback). The old [VERIFICATION.md](VERIFICATION.md) is upstream's September 2026 record on Codex 0.154. It stays as history and is not our acceptance.
 
-```sh
-codex login
-claude auth login
+## 2026-10-06: repeated compaction on short chats
 
-codex plugin marketplace add https://github.com/Reidond/codex-claude-models-plugin.git
-codex plugin add codex-claude-models@personal
-```
+There were two separate problems. The budget repair below passed three short-message turns, but a later tool-using chat still compacted three times. `result.modelUsage` adds up all requests inside the SDK query, including repeated main-model requests and auxiliary calls. Returning it as one context estimate can turn a 469k input into a 938k reported input.
 
-For an existing installation:
+The runner now enables partial SDK events and returns usage from the latest completed primary-model response. It replaces cumulative `message_delta` counters instead of adding them, waits for `message_stop`, and includes cache tokens. Missing or unfinished per-request usage rejects the response as `missing_context_usage`; it never substitutes query totals or a made-up small count. The receipt keeps aggregate `usage` with `usage_scope: "query_pipeline_total"` and separately records `context_usage`. Normal threshold-based compaction remains enabled. See the official [SDK usage guide](https://code.claude.com/docs/en/agent-sdk/cost-tracking) for the distinction between placeholder assistant counters and final stream counters.
 
-```sh
-codex plugin marketplace upgrade personal
-codex plugin add codex-claude-models@personal
-```
+The pinned SDK's per-iteration counters carry no separate model name. They inherit the model already verified on the enclosing primary stream; an explicit conflicting model is rejected. The regression fixtures cover this observed event shape, including cached input.
 
-The repository uses the scaffold's `personal` marketplace name. If another marketplace already uses that name, use a clone rather than replacing it:
+The following results are the earlier budget repair's evidence, not acceptance of the follow-up fix:
 
-```sh
-git clone https://github.com/Reidond/codex-claude-models-plugin.git
-cd codex-claude-models-plugin
-node plugins/codex-claude-models/bin/setup.mjs install
-node plugins/codex-claude-models/bin/setup.mjs activate-router
-```
+A fresh chat can already carry a large tool description. With this machine's full tool catalog, one real input measured about 391k tokens and later short turns about 480k. The old catalog triggered compaction at 96k. Shortening chat history left the tool prefix in the next request, so the cycle repeated.
 
-With the plugin installed, ask Codex:
+Discovery retains the SDK's canonical model resolution. When `sonnet` resolves to `claude-sonnet-5-5`, the catalog uses the 1M window reported by the actual final SDK result, a 750k compaction trigger and a 900k effective window. The same capacity has not been verified for other models; they keep the original budget. This result does not cover every Claude model.
 
-```text
-Use $claude-models to install and activate the combined GPT and Claude picker.
-```
+Three real Sonnet turns with the full tool catalog passed without compaction and preserved an earlier marker. All 139 unit/integration tests passed. With deterministic usage and the real Codex consumer, the old catalog compacted twice over three turns; the corrected catalog compacted zero times, and 760k usage still triggered one compaction. These are backend checks, not desktop acceptance after reloading.
 
-Or run the bundled setup from the installed path reported by `codex plugin list`:
+Reload Codex after updating an installed catalog so it reads the new budget. Chat history can stay. Existing history, request-size and step-timeout limits still apply.
 
-```sh
-node /path/to/codex-claude-models/bin/setup.mjs install
-node /path/to/codex-claude-models/bin/setup.mjs activate-router
-node /path/to/codex-claude-models/bin/setup.mjs doctor
-```
+## What has actually been checked (earlier record)
 
-**Restart Codex and start a new task once after activation.** Both model families then remain in the picker. Your current default model is preserved. Tasks created before activation can retain their original provider; selecting Claude in one of those old tasks does not retroactively reroute it.
+2026-10-06, macOS arm64, Codex 0.160.0, official Claude Code 2.1.285, Agent SDK 0.3.270.
 
-Setup discovers Claude models from the SDK and merges them with your configured or cached OpenAI catalog, falling back to Codex's bundled catalog. It preserves model names, visibility and capabilities, with one deliberate compatibility change: the combined catalog uses native **v1 subagents** for both families. Run `install` again to refresh model availability; a catalog entry does not guarantee your account has access to that model.
+Real Claude subscription, headless Codex app-server, throwaway home, small cases:
 
-## Native subagents
+- Read a fixture, then change it and read it back, over two turns in one Codex thread. Real tool events, real output, the file checked on disk, and the first turn's nonce came back in the second.
+- Interrupt mid-request: turn interrupted, request aborted, no stray child processes.
+- One 18,711-character history prompt that asks for an early fact. It's a finite text, not a token measurement or a limit test.
+- Manual compaction on a small chat, then recalling the early fact. It goes through `/responses`, not remote `/responses/compact`. It is not an overflow or auto-compaction test.
 
-In a new task using the combined router, ask for a Claude role:
+GPT: the original login-proxy path worked against real default GPT (one small request). A mock GPT → Claude → GPT switch also passes on 0.160 (deterministic providers, no model calls).
 
-```text
-Use claude_sonnet as a native subagent to review these changes. Give it a bounded task, wait for it, and compare its findings with yours.
-```
+Not checked:
 
-A Claude parent can also choose a GPT model for a native subagent. Use the model and fork options advertised by your Codex version. Start cross-model children without a full-history fork; Codex requires full-history forks to inherit their parent's role/model settings.
+- The desktop GUI main chat.
+- Real mixed GPT/Claude subagents on this build. The upstream record is not ours.
+- The read-only sandbox with live Claude. In that run the model refused without trying a tool, so it proves nothing about the sandbox. A mock run did show the real sandbox denying a write.
+- Context overflow, Linux, and any speed comparison.
 
-**Why v1?** Codex's v2 inter-agent messages can contain OpenAI-encrypted payloads. Claude cannot decrypt those, and GPT cannot decode Claude text mislabeled as encrypted content. Native v1 messages support the mixed-provider boundary. Version 0.2 therefore selects v1 in the combined catalog; the separate Claude-only profile retains v2.
+## What you need
 
-Sonnet is the verified choice for tool-using mixed delegation. Haiku passed main-task and model-switching checks, but repeatedly reported unavailable tools in GPT-parent delegation tests. That limitation is recorded rather than presented as a fully passing combination.
+- Node.js 22+ (we used 24.19.0) and npm.
+- The Codex CLI you actually use, by absolute path.
+- The official Claude CLI, and your own claude.ai Pro or Max login. API-key and Console routes aren't supported.
+- macOS. Only macOS has been accepted so far; Linux and Windows are untested, even though the config text looks generic.
 
-## How routing works
+## Build and try it in an isolated home
 
-```text
-Normal Codex model picker: GPT / Claude
-  -> one authenticated loopback provider
-     -> GPT: forward Responses bytes and SSE to OpenAI
-     -> Claude: Claude Agent SDK produces a Codex decision
-  -> Codex executes tools and displays results
-```
-
-The router uses Codex's documented [`requires_openai_auth` proxy mode](https://learn.chatgpt.com/docs/auth#alternative-model-providers). Codex supplies its current OpenAI authorization headers; this plugin does not read OpenAI credential files. GPT requests go only to fixed official ChatGPT Codex endpoints. Redirects are rejected. Status codes, auth-refresh hints, rate-limit headers, streamed events and remote-compaction responses are retained.
-
-Local access requires a separate random `X-Codex-Router-Token`, which is never forwarded upstream. Browser cookies are not forwarded. OpenAI headers are never supplied to the Claude adapter, and OpenAI credential environment variables are removed from the SDK subprocess environment. The service logs no prompts or credentials.
-
-For Claude, SDK execution tools are disabled. The adapter requests a structured decision containing text and Codex function/custom tool calls; Codex executes those calls under its own permissions. The SDK checks the local subscription account before receiving the prompt and never falls back to API keys.
-
-## Startup and configuration
-
-State lives under `$CODEX_HOME/claude-models`, normally `~/.codex/claude-models`. Setup downloads the pinned Agent SDK there; Anthropic binaries are not redistributed in this repository.
-
-`activate-router` registers one user-level SessionStart command that starts the local router on demand. It asks Codex for that exact command's native hook metadata and trusts only its returned hash. It does not use a global hook-trust bypass. This is user-level configuration because current Codex builds restrict unsigned plugin hooks. The command includes the explicit Codex home, so custom homes work correctly.
-
-Configuration changes are backed up byte-for-byte. Parsed unrelated settings are preserved, though TOML formatting/comments may change. The installer records its providers, catalogs, agent files, selected settings and startup-hook trust so it can restore them. It refuses conflicting provider or generated-file edits. Removing a hook can leave an empty group to avoid renumbering later hooks and invalidating their trust.
-
-All commands accept `--codex-home PATH`. `install` accepts `--port PORT` (default `47832`); `activate-router` accepts `--model MODEL_ID` if you explicitly want to change the default.
+Run from this checkout. Don't point it at `~/.codex`.
 
 ```sh
-node /path/to/codex-claude-models/bin/setup.mjs doctor
-node /path/to/codex-claude-models/bin/setup.mjs start
-node /path/to/codex-claude-models/bin/setup.mjs stop
-node /path/to/codex-claude-models/bin/setup.mjs deactivate
-node /path/to/codex-claude-models/bin/setup.mjs uninstall
-codex plugin remove codex-claude-models@personal
+npm ci --ignore-scripts
+npm run build
 ```
 
-`deactivate` restores the previous provider/catalog/default and removes the owned startup hook/trust. `uninstall` also removes unchanged generated providers, catalogs and agents; private runtime files and backups remain available for recovery. Run setup upgrades from the latest plugin bundle.
+The lockfile still carries a 0.154 Codex dev dependency. For real runs point `CODEX_BIN` at the Codex CLI you actually use (we used the desktop app's 0.160).
 
-The older Claude-only mode remains available for users who do not want the combined router:
+Log in the normal way, in your own terminal: `codex login` and `claude auth login`. Nothing here reads or copies credentials.
+
+**1. Write the policy file first.** Nothing runs on the Claude route without it.
 
 ```sh
-codex --profile claude
-# Optional Claude-only desktop default:
-node /path/to/codex-claude-models/bin/setup.mjs activate --model sonnet
+ISOLATED_HOME="$HOME/codex-claude-native-test"
+CLAUDE_CLI="/absolute/path/to/official/claude"      # a real file, not a symlink
+REAL_CODEX="/absolute/path/to/your/codex"
+
+mkdir -p "$ISOLATED_HOME/claude-models" && chmod 700 "$ISOLATED_HOME" "$ISOLATED_HOME/claude-models"
+cp runtime-policy.example.json "$ISOLATED_HOME/claude-models/runtime-policy.json"
+chmod 600 "$ISOLATED_HOME/claude-models/runtime-policy.json"
+"$CLAUDE_CLI" --version
+shasum -a 256 "$CLAUDE_CLI"
 ```
 
-## Limits
+Edit the copy: `claude_path`, `claude_version` and `claude_sha256` from the commands above, then `"subscription_usage_credits_disabled": true` and `"usage_credits_confirmation": {"source": "user", "date": "YYYY-MM-DD"}`. Set those only after you checked in your own account that extra usage is off. That is your recorded statement, not a live billing check, and nothing defaults it to true. The example ships as `false`/`unconfirmed` and will not load until you change it.
 
-- The combined router requires ChatGPT login for GPT. It is not an API-key proxy or a router for other custom providers.
-- GPT uses SSE through the proxy; WebSocket transport is disabled. This is not a promise of parity with every private Codex backend feature.
-- Claude accepts text and Codex function/custom tools. Images, audio, Codex output-schema mode, server-stored response IDs and remote compaction are unsupported on the Claude route.
-- OpenAI server-side web search remains available on the GPT route. Its tool definition is omitted for Claude; compatible Codex-executed browser/search functions can still be used when present.
-- Claude responses are buffered until a structured decision completes. GPT streams are forwarded as received.
-- The bridge binds only to `127.0.0.1`, rejects browser Origin headers, caps request bodies at 8 MiB and inference at 6 concurrent requests. Claude steps time out after 180 seconds; OpenAI forwarding has a 300-second idle timeout. Client disconnection cancels the corresponding request.
-- No adapter-level retries or remote shared-subscription hosting. Codex/SDK releases, authentication behavior and subscription entitlements can change.
+**2. Install into the isolated home**, on a port that isn't your existing install's:
 
-## Subscription terms
+```sh
+CODEX_BIN="$REAL_CODEX" node plugins/codex-claude-models/bin/setup.mjs install --codex-home "$ISOLATED_HOME" --port 47900
+CODEX_BIN="$REAL_CODEX" node plugins/codex-claude-models/bin/setup.mjs doctor --codex-home "$ISOLATED_HOME"
+```
 
-Anthropic's [June 15 update](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan) says its proposed billing change is paused and SDK/noninteractive usage still draws from subscription limits. Its [SDK overview](https://code.claude.com/docs/en/agent-sdk/overview) separately restricts third-party products offering claude.ai login/rate limits without approval. These notices were checked September 14, 2026; technical compatibility is not Anthropic approval, and this project claims none.
+**3. Optional: run one real case.** With no arguments the harness only prints usage. `--live` makes real requests on your Claude subscription, one case per run, in its own temporary Codex home that it deletes afterwards:
 
-Existing account limits and any extra-usage settings still apply. The plugin does not change them or implement a replacement login flow.
+```sh
+CODEX_BIN="$REAL_CODEX" ./node_modules/.bin/tsx scripts/native-acceptance.ts
+CODEX_BIN="$REAL_CODEX" ./node_modules/.bin/tsx scripts/native-acceptance.ts --live --codex-home "$ISOLATED_HOME" --report "$HOME/native-report.json" --case readwrite
+```
+
+Cases: `readwrite`, `cancel`, `readonly`, `compact`, `history`. The report is mode 600 and holds metadata only. It always says the GUI is unverified.
+
+## Turning it on globally (installation steps)
+
+Do this only after you've read the concrete config diff and rollback steps in [ADAPTATION.md](ADAPTATION.md):
+
+1. `install`, then `activate-router`, against your real Codex home. It trusts only its own startup hook, by exact hash.
+2. Restart Codex once and start a new chat. Old chats are not migrated; selecting Claude in one doesn't reroute it.
+3. Your GPT default stays as it was. `deactivate` and `uninstall` undo the owned changes.
+
+## What to expect
+
+- Claude's decision is buffered until it's complete. You see Codex's own events when Codex runs a tool. You don't see Claude's hidden thinking or every internal step.
+- Text only. Images, audio, Codex output-schema mode, server-stored response IDs and unknown history item types fail with a clear error.
+- Each step is a fresh SDK query. Continuity comes from Codex's chat history. The SDK session ID of a step is not the Codex thread ID.
+- The final SDK usage for a step can list both Sonnet and Haiku. We haven't established why the CLI uses Haiku, so don't read a run as pure Sonnet. We also can't say what else it costs, and make no promise of no extra usage.
+- No adapter-level retries and no API fallback. A cancel and a refusal are recorded as different things.
+- The guard refuses to run, naming the variable or file, if it finds API-key or route overrides: `ANTHROPIC_*`, OpenAI key or URL variables, helper settings in Claude's settings files, or an Anthropic profile.
+- Each inference attempt writes a private receipt in `<home>/claude-models/receipts` (mode 600). Model names and the session ID come only from the final result, never from the alias or the model's own claim. Cancelled and blocked attempts get receipts too, with nothing filled in.
+
+## Account terms
+
+As checked on 2026-10-06, the [Agent SDK plan article](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan) opens with a June 15 notice that the billing change is paused, and we don't treat its older tables as current policy. The [SDK overview](https://code.claude.com/docs/en/agent-sdk/overview) says third-party products may not offer claude.ai login or its limits without approval. The MIT license covers the code, not your account terms; working technically is not approval, and this is not legal advice.
 
 ## Development
 
 ```sh
-npm ci
-npm run check
-npm run test:codex
+npm ci --ignore-scripts
+npm run typecheck
+npm test
+npm run build
 ```
 
-Tests cover routing/credential isolation, forwarding/error/cancellation behavior, SDK decisions, configuration migration/rollback, and real Codex protocol consumption. The consumer tests use deterministic providers and inert credentials: they verify native tool execution and switching GPT → Claude → GPT in one task without making model API requests. Live subscription and delegation checks are separate.
-
-CI runs on macOS and Linux and checks reproducible plugin bundles. Adapter source is MIT licensed; bundled library notices are included, and the separately downloaded Claude SDK retains its own license and terms.
+`npm run test:codex` uses deterministic providers. It checks native tool execution and switching, not live model behaviour or the desktop UI.

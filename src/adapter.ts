@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { offeredTools, type ResponsesRequest, type StepResult } from './contracts.js';
+import { availableTools, type ResponsesRequest, type StepResult } from './contracts.js';
 
 const id = (prefix: string) => `${prefix}_${randomUUID().replaceAll('-', '')}`;
 
@@ -15,9 +15,12 @@ export function completedResponse(base: ReturnType<typeof responseEnvelope>, req
     phase: result.decision.calls.length ? 'commentary' : 'final_answer',
     content: [{type: 'output_text', text: result.decision.text, annotations: [], logprobs: []}],
   });
-  const tools = offeredTools(request.tools);
+  const tools = availableTools(request);
   for (const call of result.decision.calls) {
     const tool = tools.find(t => t.key === call.name)!;
+    // Codex executes the search itself and expects the arguments as an object, not a JSON string.
+    if (tool.search) {output.push({id: id('tsc'), type: 'tool_search_call', call_id: id('call'), execution: 'client', status: 'completed',
+      arguments: JSON.parse(call.input)}); continue;}
     output.push({id: id(call.kind === 'function' ? 'fc' : 'ctc'), type: call.kind === 'function' ? 'function_call' : 'custom_tool_call',
       call_id: id('call'), name: tool.name, ...(tool.namespace ? {namespace: tool.namespace} : {}), status: 'completed',
       [call.kind === 'function' ? 'arguments' : 'input']: call.input});
@@ -27,6 +30,11 @@ export function completedResponse(base: ReturnType<typeof responseEnvelope>, req
 
 export function* completionEvents(response: ReturnType<typeof completedResponse>): Generator<Record<string, unknown>> {
   for (const [index, item] of response.output.entries()) {
+    if (item.type === 'tool_search_call') {
+      yield {type: 'response.output_item.added', output_index: index, item: {...item, status: 'in_progress'}};
+      yield {type: 'response.output_item.done', output_index: index, item};
+      continue;
+    }
     yield {type: 'response.output_item.added', output_index: index, item: {...item, status: 'in_progress',
       ...(item.type === 'message' ? {content: []} : item.type === 'function_call' ? {arguments: ''} : {input: ''})}};
     if (item.type === 'message') {

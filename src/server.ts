@@ -2,13 +2,13 @@ import { createServer, type IncomingMessage } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
-import { BridgeError, requestSchema, preparePrompt, validateDecision, type RunStep } from './contracts.js';
+import { BridgeError, isCompactionRequest, requestSchema, preparePrompt, validateDecision, type RunStep } from './contracts.js';
 import { completedResponse, completionEvents, responseEnvelope } from './adapter.js';
 import { ROUTER_TOKEN_HEADER, forwardedResponseHeaders, type ForwardOpenAI } from './openai.js';
 import { VERSION } from './version.js';
 
 export interface ServerOptions {
-  token: string; run: RunStep; timeoutMs?: number; maxBytes?: number; concurrency?: number;
+  token: string; run: RunStep; timeoutMs?: number; compactionTimeoutMs?: number; heartbeatMs?: number; maxBytes?: number; concurrency?: number;
   openai?: {models: ReadonlySet<string>; forward: ForwardOpenAI; idleTimeoutMs?: number};
 }
 
@@ -60,7 +60,8 @@ export function bridgeServer(options: ServerOptions) {
       if (req.headers['content-encoding'] && req.headers['content-encoding'] !== 'identity') throw new BridgeError(415, 'content_encoding', 'The router expects uncompressed JSON requests.');
       if (active >= (options.concurrency ?? 6)) throw new BridgeError(429, 'busy', 'Claude bridge concurrency limit reached.');
       acquired = true; active++;
-      const payload = await body(req, options.maxBytes ?? 8 * 1024 * 1024);
+      // Inline screenshots make long Codex histories large; GPT steps are forwarded as-is and must not be capped below a direct request.
+      const payload = await body(req, options.maxBytes ?? 64 * 1024 * 1024);
       const model = payload.json && typeof payload.json === 'object' && 'model' in payload.json ? payload.json.model : undefined;
       if (typeof model !== 'string') throw new BridgeError(400, 'invalid_request', 'A model is required.');
       if (options.openai?.models.has(model)) {
@@ -85,17 +86,31 @@ export function bridgeServer(options: ServerOptions) {
       if (!parsed.success) throw new BridgeError(400, 'invalid_request', 'Invalid Responses request.');
       const request = parsed.data;
       preparePrompt(request);
-      base = responseEnvelope(request.model);
+      const compaction = isCompactionRequest(request);
+      const envelope = base = responseEnvelope(request.model);
       if (request.stream) {
         res.writeHead(200, {'content-type': 'text/event-stream', 'cache-control': 'no-cache', 'connection': 'keep-alive'});
-        event({type: 'response.created', response: base});
-        event({type: 'response.in_progress', response: base});
-        heartbeat = setInterval(() => res.write(': keepalive\n\n'), 10000);
+        event({type: 'response.created', response: envelope});
+        event({type: 'response.in_progress', response: envelope});
+        // Codex resets its stream idle timer only on parsed SSE events; comment lines do not count.
+        heartbeat = setInterval(() => {
+          if (!res.destroyed && !res.writableEnded) event({type: 'response.in_progress', response: envelope});
+        }, options.heartbeatMs ?? 10000);
       }
+      const limit = compaction ? (options.compactionTimeoutMs ?? 600000) : (options.timeoutMs ?? 180000);
       const timeout = new Promise<never>((_, reject) => {
-        timer = setTimeout(() => {controller.abort(); reject(new BridgeError(504, 'timeout', 'Claude step timed out.'));}, options.timeoutMs ?? 180000);
+        timer = setTimeout(() => {controller.abort(); reject(new BridgeError(504, 'timeout', compaction ? 'Claude compaction timed out.' : 'Claude step timed out.'));}, limit);
       });
-      const result = await Promise.race([options.run(request, controller.signal), timeout]);
+      // Codex has no model fallback for local compaction, so one retry keeps the user's turn from failing.
+      const step = async () => {
+        try {return await options.run(request, controller.signal);}
+        catch (error) {
+          const retryable = error instanceof BridgeError ? error.status === 502 : true;
+          if (!compaction || controller.signal.aborted || !retryable) throw error;
+          return options.run(request, controller.signal);
+        }
+      };
+      const result = await Promise.race([step(), timeout]);
       validateDecision(result.decision, request);
       const completed = completedResponse(base, request, result);
       if (request.stream) {for (const value of completionEvents(completed)) event(value); res.end();}

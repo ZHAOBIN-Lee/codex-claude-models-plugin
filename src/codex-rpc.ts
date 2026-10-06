@@ -2,8 +2,11 @@ import { spawn } from 'node:child_process';
 
 export type CodexRpc = <T>(method: string, params: unknown) => Promise<T>;
 
+// Setup and the helper scripts must talk to the same Codex executable: CODEX_BIN, else the one on PATH.
+export const codexBin = () => process.env.CODEX_BIN || 'codex';
+
 export async function withCodexRpc<T>(home: string, cwd: string, action: (rpc: CodexRpc) => Promise<T>): Promise<T> {
-  const child = spawn('codex', ['app-server', '--stdio', '--disable', 'remote_plugin', '--disable', 'apps', '--disable', 'plugins'],
+  const child = spawn(codexBin(), ['app-server', '--stdio', '--disable', 'remote_plugin', '--disable', 'apps', '--disable', 'plugins'],
     {cwd, env: {...process.env, CODEX_HOME: home}, stdio: ['pipe', 'pipe', 'pipe']});
   let sequence = 0, buffer = '';
   const pending = new Map<number, {resolve: (value: any) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>}>();

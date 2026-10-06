@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "claude_path": "/ABSOLUTE/PATH/TO/official/claude",
+  "claude_sha256": "REPLACE_WITH_THE_64_HEX_SHA256_OF_THAT_EXECUTABLE",
+  "claude_version": "REPLACE.WITH.EXACT",
+  "subscription_usage_credits_disabled": false,
+  "usage_credits_confirmation": {"source": "unconfirmed", "date": "YYYY-MM-DD"}
+}
