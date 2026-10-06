@@ -17,6 +17,7 @@ This is a modified version of [Reidond/codex-claude-models-plugin](https://githu
 - **Long steps.** A step fails only after 180 s without model activity (300 s for compaction) or at a 15 minute cap. Heartbeats are real SSE events, so Codex's idle timer does not cut off a slow step.
 - **Robustness.** A malformed decision or a stream without verifiable usage is retried once. Images in the current turn are passed to Claude. Replies follow the language of the user's own words, not the English context Codex wraps around them.
 - **Claude spawning GPT sub-agents.** The desktop app uses Codex's v2 sub-agent protocol, which puts the task in an `encrypted_content` field. A Claude parent writes plain text there, and OpenAI rejected the GPT sub-agent's first request with "Encrypted function output content could not be decrypted or decoded". The router now turns such plain-text fields into ordinary text before forwarding; real OpenAI ciphertext (`gAAAAA…`) and every other GPT request are forwarded unchanged.
+- **Concurrency.** Only Claude steps count toward the limit of 6, because each one runs a Claude Code process. GPT requests are a plain proxy and are never limited by the router; counting them caused local `429 Too Many Requests` once all chats went through the router. An extra Claude step waits in line (streamed requests keep receiving heartbeats) and fails as `busy` only after 2 minutes without a free slot.
 - **Guard rails.** Claude runs only through a pinned official CLI (path, version and SHA-256), with a subscription login and no API fallback. Every attempt writes a private receipt with the actual model and session.
 - **Install.** Transactional install and rollback, `NPM_BIN` for machines without npm on `PATH`, and scripts that move one or all existing chats to the router, with backup and rollback ([MIGRATION.md](MIGRATION.md)).
 
@@ -26,7 +27,7 @@ Details, config diff and rollback: [ADAPTATION.md](ADAPTATION.md).
 
 2026-10-06 and 07, macOS arm64, Codex 0.160.1, official Claude Code 2.1.285, Agent SDK 0.3.270, Node 24.
 
-- 197 unit and integration tests (`npm test`).
+- 200 unit and integration tests (`npm test`).
 - Real Claude subscription through headless `codex exec`:
   - A forced compaction: Sonnet summarised 423,417 tokens in 7.7 s and the chat recalled earlier output afterwards.
   - Claude to GPT in one chat, with GPT's window lowered to 40k in a temporary catalog: Sonnet compacted first, then GPT answered from the earlier history.

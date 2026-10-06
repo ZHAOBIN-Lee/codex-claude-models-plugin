@@ -39,13 +39,15 @@ Claude 的决策直接交给 Codex，由 Codex 执行并显示真实的工具调
 
 **Claude 父聊天派 GPT 子代理。** 合并目录把所有模型设成 `multi_agent_version: "v1"`，但桌面 App（0.160.1）实际仍跑 v2 子代理，派发内容放在 `encrypted_content` 字段里。Claude 当父模型时这个字段是明文，OpenAI 会以 “Encrypted function output content could not be decrypted or decoded” 拒绝 GPT 子代理的请求。`src/openai.ts` 里的 `portableAgentMessages` 只把 `agent_message` 中不是 OpenAI 密文的 `encrypted_content` 改成 `input_text`；没有需要改的内容时，原始请求字节原样转发。桌面 App 为什么没用上 v1 设置，目前还没查清。
 
+**并发与排队。** router 同时最多跑 6 个 Claude 步骤（`concurrency`）。GPT 请求不再占名额：批量迁移后所有 GPT 聊天和子代理都经过 router，长时间的 GPT 流式输出占满了 6 个名额，router 自己对 GPT 和 Claude 都返回了 `429 busy`（Codex 不重试，`request_max_retries = 0`）。现在超出上限的 Claude 步骤按先来后到排队，最多等 `queueMs`（默认 120 秒）；流式请求已经收到 200 响应头和心跳，所以超时会以 `response.failed`、代码 `busy` 的事件返回。
+
 ## 已验证与未验证
 
 ### 2026-10-07（0.3.0）
 
 macOS arm64，Codex 0.160.1，官方 Claude Code 2.1.285，Agent SDK 0.3.270。
 
-- 197 项测试通过，类型检查和构建通过。设置 `NPM_BIN` 后，安装运行时的测试也能跑。
+- 200 项测试通过，类型检查和构建通过。设置 `NPM_BIN` 后，安装运行时的测试也能跑。
 - 桌面 App：修复明文 `encrypted_content` 之后，Claude 父聊天派出 GPT 子代理（`gpt-6.1-sol`），执行 `pwd && date` 并正常回报。下面那次混合子代理测试用的是无界面的 `codex exec`，没覆盖这条路径。
 - 目录里每个 Claude 模型的窗口都取自 SDK 最终结果（100 万或 20 万）。没核实过或带后缀的 ID 按 20 万处理。
 - 真实 Sonnet 强制压缩：423,417 输入 Token 用 7.7 秒完成摘要，凭证记为 `request_kind: compaction`，之后回忆正确。

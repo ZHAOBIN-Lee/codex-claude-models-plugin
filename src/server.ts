@@ -9,7 +9,8 @@ import { VERSION } from './version.js';
 
 export interface ServerOptions {
   // timeoutMs / compactionTimeoutMs: longest stretch without model activity; maxStepMs: hard cap for any Claude step.
-  token: string; run: RunStep; timeoutMs?: number; compactionTimeoutMs?: number; maxStepMs?: number; heartbeatMs?: number; maxBytes?: number; concurrency?: number;
+  // concurrency: Claude steps running at once. queueMs: how long an extra Claude step waits for a slot before failing as busy.
+  token: string; run: RunStep; timeoutMs?: number; compactionTimeoutMs?: number; maxStepMs?: number; heartbeatMs?: number; maxBytes?: number; concurrency?: number; queueMs?: number;
   openai?: {models: ReadonlySet<string>; forward: ForwardOpenAI; idleTimeoutMs?: number};
 }
 
@@ -32,6 +33,27 @@ async function body(request: IncomingMessage, maxBytes: number) {
 
 export function bridgeServer(options: ServerOptions) {
   let active = 0;
+  const limit = options.concurrency ?? 6;
+  const waiting: (() => void)[] = [];
+  // A finished step hands its slot straight to the oldest waiter, so `active` only drops when nobody is queued.
+  const release = () => {const next = waiting.shift(); if (next) next(); else active--;};
+  const acquire = (signal: AbortSignal, waitMs: number) => new Promise<void>((resolve, reject) => {
+    if (active < limit) {active++; resolve(); return;}
+    if (waitMs <= 0 || signal.aborted) {reject(new BridgeError(429, 'busy', 'Claude bridge concurrency limit reached.')); return;}
+    const cleanup = () => {clearTimeout(timer); signal.removeEventListener('abort', cancelled);};
+    const grant = () => {cleanup(); resolve();};
+    const fail = (error: BridgeError) => {
+      cleanup();
+      const index = waiting.indexOf(grant);
+      if (index >= 0) waiting.splice(index, 1);
+      reject(error);
+    };
+    const cancelled = () => fail(new BridgeError(499, 'cancelled', 'The request was cancelled while waiting for a Claude slot.'));
+    const timer = setTimeout(() => fail(new BridgeError(429, 'busy',
+      `Claude bridge concurrency limit reached; no slot became free within ${Math.round(waitMs / 1000)} s.`)), waitMs);
+    signal.addEventListener('abort', cancelled, {once: true});
+    waiting.push(grant);
+  });
   return createServer(async (req, res) => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     let heartbeat: ReturnType<typeof setInterval> | undefined;
@@ -60,8 +82,6 @@ export function bridgeServer(options: ServerOptions) {
       }
       if (req.method !== 'POST' || !['/v1/responses', '/v1/responses/compact'].includes(req.url ?? '')) throw new BridgeError(404, 'not_found', 'Endpoint not found.');
       if (req.headers['content-encoding'] && req.headers['content-encoding'] !== 'identity') throw new BridgeError(415, 'content_encoding', 'The router expects uncompressed JSON requests.');
-      if (active >= (options.concurrency ?? 6)) throw new BridgeError(429, 'busy', 'Claude bridge concurrency limit reached.');
-      acquired = true; active++;
       // Inline screenshots make long Codex histories large; GPT steps are forwarded as-is and must not be capped below a direct request.
       const payload = await body(req, options.maxBytes ?? 64 * 1024 * 1024);
       const model = payload.json && typeof payload.json === 'object' && 'model' in payload.json ? payload.json.model : undefined;
@@ -101,6 +121,11 @@ export function bridgeServer(options: ServerOptions) {
           if (!res.destroyed && !res.writableEnded) event({type: 'response.in_progress', response: envelope});
         }, options.heartbeatMs ?? 10000);
       }
+      // Only Claude steps hold a slot: each one runs an SDK subprocess. GPT requests are a plain proxy, and once
+      // chats are migrated to the router every GPT request passes here, so counting them starved Claude and GPT alike.
+      // Extra Claude steps wait in order (a streamed request keeps receiving heartbeats) and fail as busy only after queueMs.
+      await acquire(controller.signal, options.queueMs ?? 120000);
+      acquired = true;
       // A step fails only after a stretch with no model activity, or at the hard cap. A fixed 180 s limit cut off
       // slow but active steps, such as one large patch written over a 460k-token context at high effort.
       const stallLimit = compaction ? (options.compactionTimeoutMs ?? 300000) : (options.timeoutMs ?? 180000);
@@ -135,6 +160,6 @@ export function bridgeServer(options: ServerOptions) {
         else if (res.headersSent) {event({type: 'response.failed', response: {...base, status: 'failed', error: details}}); res.end();}
         else res.writeHead(failure.status, {'content-type': 'application/json'}).end(JSON.stringify({error: details}));
       }
-    } finally {if (acquired) active--; clearTimeout(timer); clearInterval(heartbeat);}
+    } finally {if (acquired) release(); clearTimeout(timer); clearInterval(heartbeat);}
   });
 }

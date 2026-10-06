@@ -66,17 +66,23 @@ test('client disconnect aborts the active model step', {timeout: 10000}, async t
   await observed;
 });
 
-test('concurrency limit rejects work before another SDK run starts', {timeout: 10000}, async t => {
+test('with queueing off, the concurrency limit rejects work before another SDK run starts', {timeout: 10000}, async t => {
   let release!: () => void;
   const started = new Promise<void>(resolve => {release = resolve;});
   let finish!: () => void;
   const blocked = new Promise<void>(resolve => {finish = resolve;});
-  const server = bridgeServer({token: 'test-token', concurrency: 1, run: async () => {release(); await blocked; return result;}});
+  let runs = 0;
+  const server = bridgeServer({token: 'test-token', concurrency: 1, queueMs: 0, run: async () => {runs++; release(); await blocked; return result;}});
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   t.after(() => {finish(); server.closeAllConnections(); server.close();});
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/responses`;
   const first = fetch(url, {method: 'POST', headers, body: request});
   await started;
-  assert.equal((await fetch(url, {method: 'POST', headers, body: request})).status, 429);
+  // A streamed request already has its 200 header, so busy arrives as a response.failed event; a plain one gets 429.
+  const second = await fetch(url, {method: 'POST', headers, body: request});
+  const text = await second.text();
+  assert.ok(second.status === 429 || text.includes('response.failed'));
+  assert.ok(text.includes('"busy"'));
+  assert.equal(runs, 1);
   finish(); await (await first).text();
 });

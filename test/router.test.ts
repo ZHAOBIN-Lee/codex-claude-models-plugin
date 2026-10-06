@@ -88,6 +88,73 @@ test('the router forwards a Claude-spawned GPT sub-agent task as plain text', {t
   assert.ok(!seen[0]!.includes('encrypted_content'));
 });
 
+test('long GPT streams do not use Claude concurrency slots', {timeout: 10000}, async t => {
+  let release!: () => void;
+  const hold = new Promise<void>(resolve => {release = resolve;});
+  const server = bridgeServer({token: localToken, concurrency: 1, run: async () => claudeResult,
+    openai: {models: new Set(['gpt-test']), forward: async () => new Response(new ReadableStream({async start(controller) {
+      controller.enqueue(new TextEncoder().encode('data: {"type":"response.created"}\n\n'));
+      await hold; controller.close();
+    }}), {headers: {'content-type': 'text/event-stream'}})}});
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  t.after(() => {release(); server.closeAllConnections(); server.close();});
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/responses`;
+  const streams = await Promise.all([1, 2, 3].map(() => fetch(url, {method: 'POST', headers: auth, body: '{"model":"gpt-test"}'})));
+  assert.ok(streams.every(response => response.status === 200));
+  const claude = await fetch(url, {method: 'POST', headers: auth, body: JSON.stringify({model: 'claude-sdk-haiku', input: 'hi', stream: false})});
+  assert.equal(claude.status, 200);
+  release();
+  await Promise.all(streams.map(response => response.text()));
+});
+
+test('extra Claude steps wait for a free slot instead of failing', {timeout: 10000}, async t => {
+  let release!: () => void;
+  const hold = new Promise<void>(resolve => {release = resolve;});
+  let calls = 0, running = 0, peak = 0;
+  const server = bridgeServer({token: localToken, concurrency: 1, run: async () => {
+    calls++; running++; peak = Math.max(peak, running);
+    if (calls === 1) await hold;
+    running--; return claudeResult;
+  }});
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  t.after(() => {release(); server.closeAllConnections(); server.close();});
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/responses`;
+  const body = JSON.stringify({model: 'claude-sdk-haiku', input: 'hi', stream: false});
+  const first = fetch(url, {method: 'POST', headers: auth, body});
+  await new Promise(resolve => setTimeout(resolve, 200));
+  const second = fetch(url, {method: 'POST', headers: auth, body});
+  await new Promise(resolve => setTimeout(resolve, 200));
+  assert.equal(calls, 1);
+  release();
+  assert.equal((await first).status, 200);
+  assert.equal((await second).status, 200);
+  assert.equal(calls, 2);
+  assert.equal(peak, 1);
+});
+
+test('a queued Claude step fails as busy only after the queue wait', {timeout: 10000}, async t => {
+  let release!: () => void;
+  const hold = new Promise<void>(resolve => {release = resolve;});
+  const server = bridgeServer({token: localToken, concurrency: 1, queueMs: 150, heartbeatMs: 50, run: async () => {await hold; return claudeResult;}});
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  t.after(() => {release(); server.closeAllConnections(); server.close();});
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/responses`;
+  const first = fetch(url, {method: 'POST', headers: auth, body: JSON.stringify({model: 'claude-sdk-haiku', input: 'hi', stream: false})});
+  await new Promise(resolve => setTimeout(resolve, 200));
+  const started = Date.now();
+  const plain = await fetch(url, {method: 'POST', headers: auth, body: JSON.stringify({model: 'claude-sdk-haiku', input: 'hi', stream: false})});
+  assert.equal(plain.status, 429);
+  assert.equal((await plain.json()).error.code, 'busy');
+  assert.ok(Date.now() - started >= 120);
+  const streamed = await fetch(url, {method: 'POST', headers: auth, body: JSON.stringify({model: 'claude-sdk-haiku', input: 'hi', stream: true})});
+  assert.equal(streamed.status, 200);
+  const events = await streamed.text();
+  assert.ok(events.includes('response.in_progress'));
+  assert.ok(events.includes('response.failed') && events.includes('"busy"'));
+  release();
+  assert.equal((await first).status, 200);
+});
+
 test('one authenticated router serves GPT passthrough, Claude decisions, and GPT compaction', {timeout: 10000}, async t => {
   const seen: {path: string; body: string}[] = [];
   let claudeCalls = 0;
