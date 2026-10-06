@@ -2,18 +2,18 @@
 
 [中文](ADAPTATION.zh-CN.md)
 
-For developers who want to try this local adaptation themselves. The [README](README.md) has the short version, so this skips it. It is based on [Reidond/codex-claude-models-plugin](https://github.com/Reidond/codex-claude-models-plugin) at commit `dd91e36f30bf5682eb78316f3ed3b0de29d12015` (MIT, Copyright (c) 2026 Andrii Shafar, see [LICENSE](LICENSE)). It is not an upstream release. The upstream record in [VERIFICATION.md](VERIFICATION.md) is September 2026 evidence on Codex 0.154 and is kept as history, not as our acceptance. Account terms are in the README. A technical success is not Anthropic's approval for a third-party product.
+For developers who want to try this modified version themselves. The [README](README.md) has the short version, so this skips it. It is based on [Reidond/codex-claude-models-plugin](https://github.com/Reidond/codex-claude-models-plugin) at commit `dd91e36f30bf5682eb78316f3ed3b0de29d12015` (MIT; both copyright notices are in [LICENSE](LICENSE)). It is not an upstream release. The upstream record in [VERIFICATION.md](VERIFICATION.md) is September 2026 evidence on Codex 0.154 and is kept as history, not as our acceptance. Account terms are in the README. A technical success is not Anthropic's approval for a third-party product.
 
 ## The idea
 
-See the [README](README.md#2026-10-06-repeated-compaction-on-short-chats) for the 2026-10-06 short-chat compaction repair. This check verified the 1M window of `claude-sonnet-5-5` and now retains SDK alias resolution; the same capacity for other models remains unverified. The pre-activation record below is historical. Global activation on this machine was authorized and completed later.
+The [README](README.md#what-this-version-adds) lists what this version adds. Verification records below are dated; the 2026-10-06 baseline predates global activation on the maintainer's machine.
 
 ```text
 Codex → loopback provider → Claude Agent SDK → one structured decision (text + Codex tool calls)
 Codex runs the tool calls under its own sandbox and approvals, shows them, and sends the results back.
 ```
 
-The old Claude Bridge works differently: a GPT host hands a task to the Claude CLI and relays what comes back, one step at a time. Here the host no longer transcribes each step; Claude's decision goes straight to Codex, which executes and displays the real tool calls. That means less relaying by the host. It does not mean a token stream: each decision is buffered until it is complete, and Claude's hidden thinking and internal steps are not shown.
+Claude's decision goes straight to Codex, which executes and displays the real tool calls. It is not a token stream: each decision is buffered until it is complete, and Claude's hidden thinking and internal steps are not shown.
 
 No SDK execution tools are exposed (only the structured-output tool). Every step is a fresh SDK query, so continuity comes from Codex's chat history, not from an SDK resume. The SDK session ID of a step is not the Codex thread ID.
 
@@ -35,9 +35,22 @@ No SDK execution tools are exposed (only the structured-output tool). Every step
 - Each attempt writes a private receipt (mode 600). It has the wall clock from the accepted step (before the guard), preflight and query time, the stage reached, and the final result's models, session ID, usage and SDK timing counters. `usage_scope: "query_pipeline_total"` labels cumulative SDK accounting; `context_usage` separately records the completed primary response counters returned to Codex. Missing completed counters leave `context_usage` null and the response incomplete. Statuses are `complete`, `failed`, `incomplete`, `aborted` and `blocked`. A cancel before a final result leaves models and session unknown (null), never a guess. The SDK query is closed once on every path, including a cancel during the guard.
 - Model inspection has a real 30 s limit across the guard, account and model list, and checks the account before it asks for models.
 
-**Skill recursion drafts.** `plugins/codex-claude-models/skills/claude-models` now answers only explicit setup, usage-help and removal requests; with trusted native-Claude context, "use Claude" means using Codex's native tools directly. The two files in `staged-skills/` (`claude-bridge`, `dev-orchestrator`) got minimal conditional routing for the same case and keep the old flows. They are drafts and are **not installed**; nothing global was changed.
+**Skill routing.** `plugins/codex-claude-models/skills/claude-models` answers only explicit setup, usage-help and removal requests. When trusted context says the current model is native Claude, "use Claude" means using Codex's native tools directly; a second opinion is a Claude sub-agent role, not an external CLI.
 
 ## What has and hasn't been verified
+
+### 2026-10-07 (0.3.0)
+
+macOS arm64, Codex 0.160.1, official Claude Code 2.1.285, Agent SDK 0.3.270.
+
+- 194 tests pass; typecheck and build pass. With `NPM_BIN` set, the install-runtime tests run too.
+- Every Claude model in the catalog had its window read from the final SDK result (1M or 200k). Unverified or suffixed IDs fall back to 200k.
+- Forced compaction on real Sonnet: 423,417 input tokens summarised in 7.7 s, receipt `request_kind: compaction`, correct recall afterwards.
+- Claude to GPT in one chat, GPT window lowered to 40k in a temporary catalog: Codex's `ModelDownshift` compaction ran on Sonnet (70,379 tokens, 5.9 s), then GPT answered from the summary.
+- Mixed sub-agents, one shell command each: Claude parent with a GPT sub-agent (`gpt-6.1-sol`), GPT parent with `claude_sonnet` (receipt `claude-sonnet-5-5`).
+- Not verified: compaction near 750k, retries and long heartbeats in real use, Linux and Windows.
+
+### 2026-10-06 baseline
 
 Date 2026-10-06, macOS arm64. Node 24.19.0, npm 10.9.2, Codex 0.160.0, official Claude Code 2.1.285, Agent SDK 0.3.270.
 
@@ -56,7 +69,7 @@ Models: the final SDK usage listed both `claude-sonnet-5-5` and `claude-haiku-4-
 
 Two acceptance-script problems happened along the way: a chat created without ever sending its first turn, and a host that didn't close stdin. Both were script bugs and are fixed. They stay in the failure history, and there was no core startup incident.
 
-Not verified: the desktop GUI main chat, Linux and Windows, automatic context overflow, real mixed GPT/Claude subagents on this build, remote/MDM/Windows managed policy, and live Billing.
+Not verified in the baseline: the desktop GUI main chat, Linux and Windows, automatic context overflow, larger mixed GPT/Claude subagent workflows, remote/MDM/Windows managed policy, and live Billing.
 
 ## Before enabling it globally
 
@@ -64,7 +77,7 @@ You do this yourself, after reading the diff. Nothing global has been changed.
 
 1. **Prepare the policy first** at `<CODEX_HOME>/claude-models/runtime-policy.json` (mode 600). Fill the CLI path, version and SHA-256 from the real files. Facts you have already confirmed, such as extra usage being off with a date, can go straight in; nobody needs to ask you again for the same fact. The file records your statement and is not a live Billing check.
 2. Run `install`, then `activate-router`, then `doctor`, with `CODEX_BIN` pointing at the Codex you actually use. Try it in a separate home first.
-3. Restart Codex once and start a new chat. Old chats are not migrated.
+3. Restart Codex once and start a new chat. Old chats keep their original provider. To move one chat, fully quit Codex first and see `python3 scripts/thread_migration.py --help`; it keeps a backup manifest for rollback.
 
 Expected keys in `config.toml` (placeholders only; your values will differ). Setup re-serializes the file, so formatting and comments can change. Parsed unrelated fields are preserved, but a byte hash will not match.
 
@@ -139,8 +152,8 @@ node "$SETUP_MJS" uninstall --codex-home "$TARGET_HOME"
 | Route override reported | The guard names an environment variable, settings key or profile that changes the route | Remove it for this use. The guard won't be bypassed. |
 | Subscription unavailable | The CLI isn't logged in with claude.ai Pro or Max (API or Console logins don't count) | `claude auth login` in your own terminal. |
 | Exact hook trust has no match | Codex didn't return exactly one matching startup hook | Don't use a global trust bypass. Restart, run `doctor`, retry `activate-router`. |
-| Image or other non-text input | Claude route is text only | Send text, or use a GPT model for that step. |
-| Very long history | The request exceeds a limit (8 MiB body, 180 s step) or Claude's context | Shorten or start a new chat. Only a finite 18,711-character history was verified. Remote compaction is unsupported. |
+| Audio or other unsupported input | The Claude route takes text and current-turn images | Send text or an image, or use a GPT model for that step. |
+| Very long history | The request exceeds a limit (64 MiB body; a step fails after 180 s without model activity or at 15 min) or Claude's context | Shorten or start a new chat. Remote compaction is unsupported; Codex's local compaction works and was tested at 423k tokens. |
 | Generated file or provider conflict | A file or provider the tool owns was edited or already exists | Your edit is kept. Restore it or move it aside, then retry. |
 
 ## Trying a real case

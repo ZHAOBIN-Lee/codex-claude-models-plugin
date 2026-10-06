@@ -1,24 +1,24 @@
 {
   "name": "codex-claude-models",
-  "version": "0.2.0+codex.20260914163200",
+  "version": "0.3.0",
   "description": "Keep GPT and Claude together in the Codex model picker with subscription routing and native mixed-model subagents.",
   "author": {
-    "name": "Andrii Shafar",
-    "url": "https://github.com/Reidond"
+    "name": "ZHAOBIN-Lee (based on Andrii Shafar's codex-claude-models-plugin)",
+    "url": "https://github.com/ZHAOBIN-Lee"
   },
   "skills": "./skills/",
   "interface": {
     "displayName": "GPT + Claude for Codex",
     "shortDescription": "One model picker for GPT and Claude subscriptions",
     "longDescription": "Adds a permanent combined model catalog and authenticated local router. GPT uses the existing Codex ChatGPT login; Claude uses the Claude Agent SDK subscription login. Codex keeps tool execution and native v1 mixed-model subagents.",
-    "developerName": "Andrii Shafar",
+    "developerName": "ZHAOBIN-Lee, based on Andrii Shafar's original",
     "category": "Developer Tools",
     "capabilities": [
       "Interactive",
       "Read",
       "Write"
     ],
-    "websiteURL": "https://github.com/Reidond/codex-claude-models-plugin",
+    "websiteURL": "https://github.com/ZHAOBIN-Lee/codex-claude-models-plugin",
     "defaultPrompt": [
       "Keep GPT and Claude together in my model picker.",
       "Use Claude Sonnet as a native subagent.",
@@ -26,8 +26,8 @@
     ],
     "brandColor": "#C15F3C"
   },
-  "repository": "https://github.com/Reidond/codex-claude-models-plugin",
-  "homepage": "https://github.com/Reidond/codex-claude-models-plugin#readme",
+  "repository": "https://github.com/ZHAOBIN-Lee/codex-claude-models-plugin",
+  "homepage": "https://github.com/ZHAOBIN-Lee/codex-claude-models-plugin#readme",
   "license": "MIT",
   "keywords": [
     "codex",

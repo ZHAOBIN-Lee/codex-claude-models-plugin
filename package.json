@@ -1,6 +1,6 @@
 {
   "name": "codex-claude-models-plugin",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Claude models and native Codex subagents through the Claude Agent SDK",
   "scripts": {
     "typecheck": "tsc",
@@ -10,7 +10,11 @@
     "test:codex": "tsx scripts/codex-smoke.ts && tsx scripts/router-smoke.ts && tsx scripts/context-smoke.ts"
   },
   "keywords": [],
-  "author": "Andrii Shafar",
+  "author": "ZHAOBIN-Lee",
+  "contributors": [
+    "Andrii Shafar (original author, https://github.com/Reidond/codex-claude-models-plugin)"
+  ],
+  "repository": "https://github.com/ZHAOBIN-Lee/codex-claude-models-plugin",
   "license": "MIT",
   "type": "module",
   "dependencies": {

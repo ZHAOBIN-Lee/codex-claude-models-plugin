@@ -1,52 +1,43 @@
-# 把 Claude 做成原生 Codex 模型（本地适配）
+# 把 Claude 做成原生 Codex 模型
 
 [English](README.md)
 
-目标：由 Claude 做决策，Codex 执行工具，真实的工具调用显示在主聊天里。中间有本地的 router 和 SDK 进程，但工作仍留在主聊天：由 Codex 执行工具并显示真实调用，没有侧边面板。
+在 Codex 平常的模型菜单里直接选 Claude，和 GPT 放在一起。由 Claude 做决策，Codex 执行工具，真实的工具调用显示在主聊天里。本地 router 把 GPT 请求用你现有的 Codex 登录发给 OpenAI，把 Claude 请求用你自己的 Claude 订阅登录交给 Claude Agent SDK。
 
-**状态：本地、未发布。** 已在本机启用，用户确认能够调用。2026-10-06 第一次修复调整了 Sonnet 的上下文预算，随后用量修复也已安装：161 项测试通过，真实 Codex app-server 连续运行三轮 Claude 对话、六次原生文件读取，自动压缩零次；实际返回的上下文及缓存计数与新凭证一致。本次后续验收通过无界面的原生客户端完成。下方早期验收记录来自全局启用之前。
+**状态：0.3.0，公开预览。** 维护者在 macOS 上日常使用。目前只在这一台机器上测试过，见[已核对的内容](#已核对的内容)。
 
-这是对 [Reidond/codex-claude-models-plugin](https://github.com/Reidond/codex-claude-models-plugin)（提交 `dd91e36f30bf5682eb78316f3ed3b0de29d12015`）的本地适配，MIT 许可，版权 Copyright (c) 2026 Andrii Shafar，见 [LICENSE](LICENSE)。它不是上游发布的新版本，直接克隆上游 `main` 拿不到这些改动。
+## 基于上游
 
-更多细节见 [ADAPTATION.zh-CN.md](ADAPTATION.zh-CN.md)（改了什么、配置差异、回退）。旧的 [VERIFICATION.md](VERIFICATION.md) 是上游 2026 年 9 月在 Codex 0.154 上的记录，作为历史保留，不是我们的验收。
+这是 Andrii Shafar 的 [Reidond/codex-claude-models-plugin](https://github.com/Reidond/codex-claude-models-plugin) 的修改版，起点是提交 `dd91e36f30bf5682eb78316f3ed3b0de29d12015`（MIT 许可）。本地 router、请求适配、GPT 转发、合并的模型菜单和安装流程来自上游。两方的版权声明都在 [LICENSE](LICENSE) 里。它不是上游发布的版本，上游 `main` 里没有这些改动。[VERIFICATION.md](VERIFICATION.md) 是上游 2026 年 9 月在 Codex 0.154 上的记录，作为历史保留。
 
-## 2026-10-06：连续调用反复压缩
+## 这个版本新增了什么
 
-这里有两个问题。下面的窗口修复通过了三轮短消息测试，但后来的工具任务仍压缩了三次。`result.modelUsage` 累加 SDK 整次查询里的所有请求，包括重复的主模型请求和辅助模型调用。把它作为当前上下文返回，会出现单次输入 46.9 万、报告输入 93.8 万的情况。
+- **上下文与压缩。** 交给 Codex 的是最近一次完整主模型请求的用量，不再是 SDK 的累计总量；以前的累计值会让短聊天每一步都压缩。每个 Claude 模型使用实测窗口（100 万或 20 万），没核实过的模型或带 `[1m]` 后缀的 ID 按 20 万处理。连接器和 MCP 工具改为通过 `tool_search` 按需加载，一般每步的输入从约 48 万 Token 降到 4～7 万。
+- **切换到 GPT。** 切到窗口更小的模型时，Codex 会先让上一个模型压缩，所以由 Claude 写摘要、GPT 接收摘要，Claude 可以继续用 75 万的压缩门槛。压缩请求会被识别出来，单独放宽时间上限，失败时重试一次。
+- **长步骤。** 只有连续 180 秒没有模型活动（压缩为 300 秒），或单步超过 15 分钟，才判为超时。心跳是真实的 SSE 事件，Codex 的空闲计时不会把慢但仍在进行的步骤断掉。
+- **稳健性。** 格式错误的决策、或拿不到可核实用量的流会重试一次。当前回合的图片会交给 Claude。回复语言按用户自己写的文字判断，不受 Codex 包在外面的英文内容影响。
+- **安全边界。** Claude 只通过固定的官方 CLI 运行（路径、版本和 SHA-256 都核对），要求订阅登录，没有 API 回退。每次调用都写一份私有凭证，记录实际模型和会话。
+- **安装。** 安装和回退是事务式的；`PATH` 里没有 npm 时可用 `NPM_BIN` 指定；另有脚本可以把一个已有聊天迁移到 router。
 
-现在启用 SDK 的部分流事件，取最近一次已经完整结束的主模型响应用量。`message_delta` 中的累计计数直接替换，不相加；等到 `message_stop` 后才采用，缓存 Token 仍计入输入。缺失或未结束的单次用量会以 `missing_context_usage` 拒绝返回，不用整次累计数或人为缩小的值代替。凭证保留累计 `usage`，以 `usage_scope: "query_pipeline_total"` 标明范围，并单独保存 `context_usage`。正常的超限压缩继续启用。占位消息用量与最终流计数的区别见官方 [SDK 用量说明](https://code.claude.com/docs/en/agent-sdk/cost-tracking)。
+细节、配置差异和回退见 [ADAPTATION.zh-CN.md](ADAPTATION.zh-CN.md)。
 
-当前固定版本的 SDK 在单次采样用量中不提供独立模型名，因此采用已校验的外层主模型信息；如果它明确提供了不同模型，则拒绝接受。回归数据已覆盖实际观察到的事件形状，并保留缓存输入计数。
+## 已核对的内容
 
-以下是早先窗口修复的验收记录，不能作为后一次修复的验收：
+2026-10-06 至 07，macOS arm64，Codex 0.160.1，官方 Claude Code 2.1.285，Agent SDK 0.3.270，Node 24。
 
-新聊天也可能带着很大的工具说明。本机完整工具列表的一次真实输入约 39 万 token，后续短回合约 48 万；原目录却在 9.6 万就触发压缩。聊天历史缩短后，工具说明又会加回来，所以一直循环。
+- 194 项单元和集成测试（`npm test`）。
+- 通过无界面的 `codex exec` 使用真实 Claude 订阅：
+  - 强制压缩一次：Sonnet 压缩 423,417 Token 用了 7.7 秒，之后聊天能正确回忆前面的输出。
+  - 同一个聊天从 Claude 切到 GPT，临时 catalog 把 GPT 窗口调到 4 万：先由 Sonnet 压缩，GPT 再根据前面的历史作答。
+  - 混合子代理，各执行一条命令：Claude 聊天派出 GPT 子代理，GPT 聊天派出 `claude_sonnet`。
+- 在桌面 App 里日常使用，包括一个迁移到 router 的旧聊天。这是维护者自己的使用，不是正式验收。
 
-保留 SDK 返回的实际型号解析结果。`sonnet` 解析为 `claude-sonnet-5-5` 时，使用这次真实 SDK 最终结果报告的 100 万窗口，75 万触发压缩，90 万作为有效窗口。其他型号的相同容量尚未验证，仍保留原预算；不能把这次结果视为所有 Claude 型号都已通过。
+没有核对：
 
-完整工具列表下，真实 Sonnet 连续三轮通过，压缩次数为零，跨轮暗号保留。139 项单元/集成测试通过；真实 Codex 消费者配模拟用量时，旧配置三轮压缩两次，新配置零次，76 万用量仍压缩一次。这些是后端验收，不是桌面重载后的显示验收。
-
-更新已安装的目录后，需要重载 Codex 才能读取新预算。无需删除聊天记录。原有的长历史、请求大小和单步超时限制仍适用。
-
-## 实际核对过什么（早期记录）
-
-2026-10-06，macOS arm64，Codex 0.160.0，官方 Claude Code 2.1.285，Agent SDK 0.3.270。
-
-真实 Claude 订阅、无界面 Codex app-server、一次性临时目录、小范围用例：
-
-- 读一个固定文件，再修改并读回，两轮在同一个 Codex 线程里。工具事件和输出都是真的，文件在磁盘上核对过，第一轮的暗号在第二轮也答对了。
-- 请求进行中取消：回合被中断，请求被中止，没有残留子进程。
-- 一次 18,711 字符的历史提示，要求回答开头的事实。它是有限文本，不是 token 实测，也不是上限测试。
-- 小对话手动压缩后再回忆早期事实。走的是 `/responses`，不是远程 `/responses/compact`，也不是溢出或自动压缩测试。
-
-GPT：原来的登录代理路径对真实默认 GPT 跑通了（一次小请求）。模拟的 GPT → Claude → GPT 切换在 0.160 上也通过（确定性模拟提供方，没有真实模型调用）。
-
-没验过的：
-
-- 桌面 GUI 主聊天。
-- 这个版本上真实的 GPT/Claude 混合子 Agent。上游的记录不算我们的。
-- 真实 Claude 下的只读沙箱。那次模型没尝试工具就拒绝了，对沙箱说明不了什么。模拟提供方的一次运行确实看到真实沙箱拒绝了写入。
-- 上下文溢出、Linux、任何速度对比。
+- Linux 和 Windows。
+- 接近 75 万门槛时的压缩；耗时是按上面的结果推算的。
+- 重试和长时间心跳在真实使用中的表现（只有单元测试）。
+- 更大的混合子代理流程，以及只读沙箱下的真实 Claude。
 
 ## 需要什么
 
@@ -105,18 +96,18 @@ CODEX_BIN="$REAL_CODEX" ./node_modules/.bin/tsx scripts/native-acceptance.ts --l
 只有读完 [ADAPTATION.zh-CN.md](ADAPTATION.zh-CN.md) 里的具体配置差异和回退步骤之后再做：
 
 1. 对你真实的 Codex 目录执行 `install`，再 `activate-router`。它只按精确哈希信任自己那一条启动钩子。
-2. 重启一次 Codex，开新聊天。旧聊天不会自动迁移，在旧聊天里选 Claude 也不会改变它的路线。
+2. 重启一次 Codex，开新聊天。旧聊天保留原来的 provider；`scripts/thread_migration.py` 可以一次迁移一个聊天（见 [ADAPTATION.zh-CN.md](ADAPTATION.zh-CN.md)）。
 3. 你原来的 GPT 默认模型保持不变。`deactivate` 和 `uninstall` 会撤销它自己加的改动。
 
 ## 使用时要知道
 
-- Claude 的决策要等完整返回才显示。Codex 真正执行工具时会显示 Codex 自己的事件，但看不到 Claude 的隐藏思考，也看不到它内部的每一步。
-- 只支持文字。图片、音频、Codex 输出 schema 模式、服务端保存的响应 ID 和不认识的历史项类型都会明确报错。
+- Claude 的决策要等完整返回才显示。Codex 执行工具时会显示 Codex 自己的事件，看不到 Claude 的隐藏思考，也看不到它内部的每一步。
+- 支持文字和当前回合的图片，更早的图片会变成占位说明。音频、Codex 输出 schema 模式和服务端保存的响应 ID 会明确报错。
 - 每一步都是新的 SDK 查询，连续性来自 Codex 的聊天历史。某一步的 SDK 会话 ID 不是 Codex 的线程 ID。
-- 某一步 SDK 最终用量里可能同时有 Sonnet 和 Haiku。我们没查清 CLI 为什么会用 Haiku，所以别把一次运行当成纯 Sonnet。它还会产生什么别的开销我们也说不清，不承诺没有额外用量。
-- 适配层不自动重试，也没有 API 回退。取消和拒绝会分开记录。
+- 某一步 SDK 最终用量里可能同时出现所选模型和 Haiku。我们没查清 CLI 为什么会用 Haiku，也不承诺没有额外用量。
+- 只在上面列出的情况下重试，没有 API 回退。取消和拒绝会分开记录。
 - 如果发现 API 密钥或路线覆盖项，守卫会拒绝运行并说明是哪个变量或文件：`ANTHROPIC_*`、OpenAI 的密钥或地址变量、Claude 设置文件里的辅助程序设置，或 Anthropic 配置档。
-- 每次推理尝试都会在 `<home>/claude-models/receipts` 写一份私有回执（权限 600）。模型名和会话 ID 只取自最终结果，不取别名，也不取模型自己的说法。被取消和被拦下的尝试也有回执，什么都不会替它填。
+- 每次推理尝试都会在 `<home>/claude-models/receipts` 写一份私有凭证（权限 600）。模型名和会话 ID 只取自最终结果，不取别名，也不取模型自己的说法。
 
 ## 账户条款
 
@@ -130,5 +121,7 @@ npm run typecheck
 npm test
 npm run build
 ```
+
+`PATH` 里没有 npm 时，在 `install` 前把 `NPM_BIN` 设为 npm 可执行文件或 `npm-cli.js`。
 
 `npm run test:codex` 用的是确定性模拟提供方，检查的是原生工具执行和切换，不是真实模型行为，也不是桌面界面。

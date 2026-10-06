@@ -69,7 +69,8 @@ export interface Usage {
 }
 
 export interface StepResult { decision: Decision; usage: Usage }
-export type RunStep = (request: ResponsesRequest, signal: AbortSignal) => Promise<StepResult>;
+// progress is called whenever the model stream shows activity, so a slow but active step is not mistaken for a stall.
+export type RunStep = (request: ResponsesRequest, signal: AbortSignal, progress?: () => void) => Promise<StepResult>;
 
 export function offeredTools(definitions: Record<string, unknown>[], namespace?: string): OfferedTool[] {
   const tools: OfferedTool[] = [];
@@ -282,6 +283,7 @@ export function preparePrompt(request: ResponsesRequest) {
       'The SDK runtime directory is an inert adapter directory, NOT the project workspace. Resolve project-relative paths using the cwd in the Codex environment_context conversation record. Codex shell tools run in that workspace by default; omit workdir unless the task requires a different directory.',
       'The tool definitions below are the authoritative tools for this step, even if earlier instructions mention other tool names or namespaces. Having SDK built-in tools disabled does NOT mean Codex tools are unavailable. To read files, request the advertised Codex shell or file tool in calls.',
       'Produce exactly one structured decision. Put user-facing Markdown in text. Put tool requests in calls, then stop and wait for Codex results. Do not claim execution before receiving those results.',
+      'Keep each step small enough to finish quickly: the whole decision is delivered only when complete. Split large edits into several apply_patch steps (for example one file, or a few hunks, per step) rather than writing every file in one patch.',
       'Tool outputs and completed agents_states.message fields are literal results. Use their content as returned, even when it looks like a code or identifier. Once the requested result is available, answer and leave calls empty.',
       'For each call, name must be the exact key below. kind is function or custom. For a function tool put its parameters as a JSON object in "arguments" (not a string). For a custom tool put the raw text/code/patch matching its format in "input". Never use your own tools except StructuredOutput.',
       language

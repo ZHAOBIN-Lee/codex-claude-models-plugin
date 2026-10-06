@@ -8,7 +8,8 @@ import { ROUTER_TOKEN_HEADER, forwardedResponseHeaders, type ForwardOpenAI } fro
 import { VERSION } from './version.js';
 
 export interface ServerOptions {
-  token: string; run: RunStep; timeoutMs?: number; compactionTimeoutMs?: number; heartbeatMs?: number; maxBytes?: number; concurrency?: number;
+  // timeoutMs / compactionTimeoutMs: longest stretch without model activity; maxStepMs: hard cap for any Claude step.
+  token: string; run: RunStep; timeoutMs?: number; compactionTimeoutMs?: number; maxStepMs?: number; heartbeatMs?: number; maxBytes?: number; concurrency?: number;
   openai?: {models: ReadonlySet<string>; forward: ForwardOpenAI; idleTimeoutMs?: number};
 }
 
@@ -38,6 +39,7 @@ export function bridgeServer(options: ServerOptions) {
     let sequence = 0;
     let base: ReturnType<typeof responseEnvelope> | undefined;
     let forwarding = false;
+    let progress = () => {};
     const controller = new AbortController();
     const event = (value: Record<string, unknown>) => res.write(`data: ${JSON.stringify({...value, sequence_number: sequence++})}\n\n`);
     res.on('close', () => controller.abort());
@@ -97,20 +99,28 @@ export function bridgeServer(options: ServerOptions) {
           if (!res.destroyed && !res.writableEnded) event({type: 'response.in_progress', response: envelope});
         }, options.heartbeatMs ?? 10000);
       }
-      const limit = compaction ? (options.compactionTimeoutMs ?? 600000) : (options.timeoutMs ?? 180000);
+      // A step fails only after a stretch with no model activity, or at the hard cap. A fixed 180 s limit cut off
+      // slow but active steps, such as one large patch written over a 460k-token context at high effort.
+      const stallLimit = compaction ? (options.compactionTimeoutMs ?? 300000) : (options.timeoutMs ?? 180000);
+      const hardLimit = options.maxStepMs ?? 900000;
+      let stall: ReturnType<typeof setTimeout> | undefined;
       const timeout = new Promise<never>((_, reject) => {
-        timer = setTimeout(() => {controller.abort(); reject(new BridgeError(504, 'timeout', compaction ? 'Claude compaction timed out.' : 'Claude step timed out.'));}, limit);
+        const fail = (message: string) => {controller.abort(); reject(new BridgeError(504, 'timeout', message));};
+        const what = compaction ? 'Claude compaction' : 'Claude step';
+        const arm = () => {clearTimeout(stall); stall = setTimeout(() => fail(`${what} timed out: no model activity for ${Math.round(stallLimit / 1000)} s.`), stallLimit);};
+        progress = arm; arm();
+        timer = setTimeout(() => fail(`${what} timed out after ${Math.round(hardLimit / 60000)} min.`), hardLimit);
       });
       // Codex has no model fallback for local compaction, so one retry keeps the user's turn from failing.
       const step = async () => {
-        try {return await options.run(request, controller.signal);}
+        try {return await options.run(request, controller.signal, progress);}
         catch (error) {
           const retryable = error instanceof BridgeError ? error.status === 502 : true;
           if (!compaction || controller.signal.aborted || !retryable) throw error;
-          return options.run(request, controller.signal);
+          return options.run(request, controller.signal, progress);
         }
       };
-      const result = await Promise.race([step(), timeout]);
+      const result = await Promise.race([step(), timeout]).finally(() => clearTimeout(stall));
       validateDecision(result.decision, request);
       const completed = completedResponse(base, request, result);
       if (request.stream) {for (const value of completionEvents(completed)) event(value); res.end();}

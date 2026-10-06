@@ -2,18 +2,18 @@
 
 [English](ADAPTATION.md)
 
-写给想自己试用这个本地适配的开发者。[README](README.zh-CN.md) 已有简版，这里不重复。它基于 [Reidond/codex-claude-models-plugin](https://github.com/Reidond/codex-claude-models-plugin) 的提交 `dd91e36f30bf5682eb78316f3ed3b0de29d12015`（MIT 许可，Copyright (c) 2026 Andrii Shafar，见 [LICENSE](LICENSE)），不是上游发布的版本。[VERIFICATION.md](VERIFICATION.md) 是上游 2026 年 9 月在 Codex 0.154 上的记录，作为历史保留，不是我们的验收。账户条款见 README。技术上跑通不等于 Anthropic 批准第三方产品这么用。
+写给想自己试用这个修改版的开发者。[README](README.zh-CN.md) 已有简版，这里不重复。它基于 [Reidond/codex-claude-models-plugin](https://github.com/Reidond/codex-claude-models-plugin) 的提交 `dd91e36f30bf5682eb78316f3ed3b0de29d12015`（MIT 许可，两方的版权声明都在 [LICENSE](LICENSE) 里），不是上游发布的版本。[VERIFICATION.md](VERIFICATION.md) 是上游 2026 年 9 月在 Codex 0.154 上的记录，作为历史保留，不是我们的验收。账户条款见 README。技术上跑通不等于 Anthropic 批准第三方产品这么用。
 
 ## 思路
 
-2026-10-06 的短聊天反复压缩修复见 [README](README.zh-CN.md#2026-10-06连续调用反复压缩)。这一轮验证了 `claude-sonnet-5-5` 的 100 万窗口，并保留 SDK 的别名解析结果；其他型号的同等容量仍未验证。下面的全局启用前记录属于早期阶段，本机后来已获得授权并启用。
+这个版本新增了什么，见 [README](README.zh-CN.md#这个版本新增了什么)。下面的验证记录都标了日期；2026-10-06 的基线早于维护者本机的全局启用。
 
 ```text
 Codex → 本地回环提供方 → Claude Agent SDK → 一份结构化决策（文字 + Codex 工具调用）
 Codex 在自己的沙箱和审批下执行这些工具调用，显示出来，再把结果送回去。
 ```
 
-旧的 Claude Bridge 是另一种做法：GPT 宿主把任务交给 Claude CLI，再把返回的内容一步步转述。这里宿主不再逐步转述，Claude 的决策直接交给 Codex，由 Codex 执行并显示真实的工具调用。所以减少的是宿主的逐步转述，不是做成了逐 token 流：每个决策要等完整返回才显示，Claude 的隐藏思考和内部步骤看不到。
+Claude 的决策直接交给 Codex，由 Codex 执行并显示真实的工具调用。它不是逐 token 流：每个决策要等完整返回才显示，Claude 的隐藏思考和内部步骤看不到。
 
 不开放任何 SDK 执行工具（只有结构化输出那一个）。每一步都是新的 SDK 查询，连续性来自 Codex 的聊天历史，不是 SDK 续接。某一步的 SDK 会话 ID 不是 Codex 的线程 ID。
 
@@ -35,9 +35,22 @@ Codex 在自己的沙箱和审批下执行这些工具调用，显示出来，�
 - 每次尝试写一份私有回执（权限 600）。里面有从被接受的那一步开始（在守卫之前）的总耗时、预检和查询耗时、走到的阶段，以及最终结果里的模型、会话 ID、用量和 SDK 计时。`usage_scope: "query_pipeline_total"` 标明 SDK 累计用量；`context_usage` 单独记录已结束的主模型响应计数，供 Codex 判断当前上下文。缺失完整计数时，`context_usage` 保持 null，响应状态为 incomplete。状态有 `complete`、`failed`、`incomplete`、`aborted`、`blocked`。没有最终结果就被取消时，模型和会话保持未知（null），不猜。SDK 查询在每条路径上只关闭一次，包括守卫期间取消。
 - 模型检查有真正的 30 秒上限，覆盖守卫、账户和模型列表，并且先核对账户，再去取模型。
 
-**Skill 递归路由草稿。** `plugins/codex-claude-models/skills/claude-models` 现在只回应明确的安装设置、使用说明和移除请求；有可信的原生 Claude 上下文时，“用 Claude”就是直接用 Codex 原生工具。`staged-skills/` 里的两个文件（`claude-bridge`、`dev-orchestrator`）只加了同一情形下的最小条件路由，旧流程保留。它们只是草稿，**没有安装**，全局什么都没改。
+**Skill 路由。** `plugins/codex-claude-models/skills/claude-models` 只回应明确的安装设置、使用说明和移除请求。可信上下文表明当前模型就是原生 Claude 时，“用 Claude”就是直接用 Codex 原生工具；需要第二意见时派 Claude 子代理角色，不调用外部 CLI。
 
 ## 已验证与未验证
+
+### 2026-10-07（0.3.0）
+
+macOS arm64，Codex 0.160.1，官方 Claude Code 2.1.285，Agent SDK 0.3.270。
+
+- 194 项测试通过，类型检查和构建通过。设置 `NPM_BIN` 后，安装运行时的测试也能跑。
+- 目录里每个 Claude 模型的窗口都取自 SDK 最终结果（100 万或 20 万）。没核实过或带后缀的 ID 按 20 万处理。
+- 真实 Sonnet 强制压缩：423,417 输入 Token 用 7.7 秒完成摘要，凭证记为 `request_kind: compaction`，之后回忆正确。
+- 同一聊天从 Claude 切到 GPT，临时 catalog 把 GPT 窗口调到 4 万：Codex 的 `ModelDownshift` 压缩在 Sonnet 上执行（70,379 Token，5.9 秒），GPT 再根据摘要作答。
+- 混合子代理，各执行一条命令：Claude 父聊天派 GPT 子代理（`gpt-6.1-sol`），GPT 父聊天派 `claude_sonnet`（凭证为 `claude-sonnet-5-5`）。
+- 未验证：接近 75 万时的压缩、重试和长时间心跳在真实使用中的表现、Linux 和 Windows。
+
+### 2026-10-06 基线
 
 日期 2026-10-06，macOS arm64。Node 24.19.0，npm 10.9.2，Codex 0.160.0，官方 Claude Code 2.1.285，Agent SDK 0.3.270。
 
@@ -56,7 +69,7 @@ Codex 在自己的沙箱和审批下执行这些工具调用，显示出来，�
 
 过程中出现过两个验收脚本问题：只创建了聊天却没发第一轮，以及主机没关闭 stdin。两个都是脚本问题，已修正。它们留在失败历史里，核心启动并没有出过事故。
 
-未验证：桌面 GUI 主聊天、Linux 和 Windows、自动上下文溢出、这个版本上真实的 GPT/Claude 混合子 Agent、远程/MDM/Windows 托管策略、实时账单。
+基线未验证：桌面 GUI 主聊天、Linux 和 Windows、自动上下文溢出、更大规模的 GPT/Claude 混合子代理流程、远程/MDM/Windows 托管策略、实时账单。
 
 ## 全局启用之前
 
@@ -64,7 +77,7 @@ Codex 在自己的沙箱和审批下执行这些工具调用，显示出来，�
 
 1. **先准备政策文件**：`<CODEX_HOME>/claude-models/runtime-policy.json`（权限 600）。CLI 路径、版本、SHA-256 从真实文件里取。你已经确认过的信息，比如额外用量已关闭及日期，可以直接填，不会为同一件事再问你。这个文件只记录你的声明，不是实时账单核查。
 2. 依次执行 `install`、`activate-router`、`doctor`，`CODEX_BIN` 指向你实际使用的 Codex。先在一个单独的目录里试。
-3. 重启一次 Codex，开新聊天。旧聊天不会迁移。
+3. 重启一次 Codex，开新聊天。旧聊天保留原来的 provider。要迁移某个聊天，先完全退出 Codex，再看 `python3 scripts/thread_migration.py --help`；它会保留备份清单，方便回退。
 
 `config.toml` 里应出现的键（只有占位符，你的值会不同）。设置工具会重新序列化这个文件，格式和注释可能变；解析后的无关字段保留，但字节哈希不会相同。
 
@@ -139,8 +152,8 @@ node "$SETUP_MJS" uninstall --codex-home "$TARGET_HOME"
 | 报告路线覆盖项 | 守卫点名了会改变路线的环境变量、设置项或配置档 | 这次使用时把它移除，守卫不会被绕过。 |
 | 订阅不可用 | CLI 不是以 claude.ai Pro 或 Max 登录（API 或 Console 登录不算） | 在你自己的终端里 `claude auth login`。 |
 | 精确钩子信任没有匹配 | Codex 没有恰好返回一条匹配的启动钩子 | 不要用全局信任绕过。重启，运行 `doctor`，再重试 `activate-router`。 |
-| 图片等非文字输入 | Claude 路线只支持文字 | 发文字，或这一步换 GPT 模型。 |
-| 历史很长 | 请求超出限制（8 MiB 请求体、180 秒单步）或 Claude 上下文 | 缩短，或开新聊天。只验证过 18,711 字符的有限历史，不支持远程压缩。 |
+| 音频等不支持的输入 | Claude 路线支持文字和当前回合的图片 | 发文字或图片，或这一步换 GPT 模型。 |
+| 历史很长 | 请求超出限制（64 MiB 请求体；连续 180 秒没有模型活动或单步超过 15 分钟会失败）或 Claude 上下文 | 缩短，或开新聊天。不支持远程压缩；Codex 的本地压缩可用，已在 42.3 万 Token 上测试过。 |
 | 生成文件或提供方冲突 | 工具自有的文件或提供方被改过，或已存在 | 你的改动会保留。恢复它或挪开，再重试。 |
 
 ## 试跑一个真实用例

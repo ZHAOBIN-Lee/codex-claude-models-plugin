@@ -133,7 +133,7 @@ function resolveEffort(model: ClaudeModel, request: ResponsesRequest) {
 }
 
 export function sdkRunner(cwd: string, models: ClaudeModel[], queryImpl: typeof query = query, runtime: RuntimeOptions = {}): RunStep {
-  return async (request: ResponsesRequest, signal: AbortSignal) => {
+  return async (request: ResponsesRequest, signal: AbortSignal, progress: () => void = () => {}) => {
     // Client errors end here: an unknown model, unsupported input or effort is not an inference attempt and leaves no receipt.
     const model = models.find(m => m.id === request.model);
     if (!model) throw new BridgeError(400, 'unknown_model', 'Unknown Claude model. Run setup install to refresh the catalog.');
@@ -181,6 +181,8 @@ export function sdkRunner(cwd: string, models: ClaudeModel[], queryImpl: typeof 
         const next = await raceAbort(iterator.next(), abortController.signal);
         if (next.done) break;
         const message = next.value as unknown as Record<string, unknown>;
+        // Thinking and output arrive as frequent stream events (measured gaps under 2 s at high effort).
+        progress();
         if (message.type === 'result') {final = message; stage = 'final_received'; break;}
         contextTracker.observe(message);
       }

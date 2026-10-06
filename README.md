@@ -1,52 +1,43 @@
-# Claude as a native Codex model (local adaptation)
+# Claude as a native Codex model
 
 [中文](README.zh-CN.md)
 
-The goal: Claude makes the decisions, Codex runs the tools, and the real tool calls show up in the main chat. A local router and SDK process sit in between, but the work stays in the main chat: Codex executes the tools and shows the real calls, with no side panel.
+Pick Claude in the normal Codex model picker, next to GPT. Claude makes the decisions, Codex runs the tools, and the real tool calls show up in the main chat. A local router sends GPT requests to OpenAI with your existing Codex login and Claude requests to the Claude Agent SDK with your own Claude subscription login.
 
-**Status: local and unreleased.** Enabled on this machine, with the user confirming calls work. The first 2026-10-06 repair corrected Sonnet's context budget. The follow-up usage-accounting fix is now installed: 161 tests passed, and a real Codex app-server ran three continuous Claude turns with six native file reads and zero automatic compactions. Its reported context and cache counters matched the new receipts. This follow-up check was headless; the earlier acceptance notes below predate global activation.
+**Status: 0.3.0, public preview.** The maintainer uses it daily on macOS. It has only been tested on that machine; see [What has been checked](#what-has-been-checked).
 
-This is a local adaptation of [Reidond/codex-claude-models-plugin](https://github.com/Reidond/codex-claude-models-plugin) at commit `dd91e36f30bf5682eb78316f3ed3b0de29d12015` (MIT, Copyright (c) 2026 Andrii Shafar, see [LICENSE](LICENSE)). It is not an upstream release, and cloning upstream `main` will not give you these changes.
+## Based on upstream
 
-More detail: [ADAPTATION.md](ADAPTATION.md) (changes, config diff, rollback). The old [VERIFICATION.md](VERIFICATION.md) is upstream's September 2026 record on Codex 0.154. It stays as history and is not our acceptance.
+This is a modified version of [Reidond/codex-claude-models-plugin](https://github.com/Reidond/codex-claude-models-plugin) by Andrii Shafar, starting from commit `dd91e36f30bf5682eb78316f3ed3b0de29d12015` (MIT). The local router, the request adapter, GPT forwarding, the combined model picker and the setup flow come from upstream. Both copyright notices are in [LICENSE](LICENSE). It is not an upstream release, and upstream `main` does not contain these changes. [VERIFICATION.md](VERIFICATION.md) is upstream's September 2026 record on Codex 0.154, kept as history.
 
-## 2026-10-06: repeated compaction on short chats
+## What this version adds
 
-There were two separate problems. The budget repair below passed three short-message turns, but a later tool-using chat still compacted three times. `result.modelUsage` adds up all requests inside the SDK query, including repeated main-model requests and auxiliary calls. Returning it as one context estimate can turn a 469k input into a 938k reported input.
+- **Context and compaction.** Codex receives the usage of the latest completed main-model request, not the SDK's accumulated total, which had made short chats compact after every step. Each Claude model gets its measured window (1M or 200k); an unverified model or a `[1m]` suffix falls back to 200k. Connector and MCP tools are deferred behind `tool_search`, which cut a typical step from about 480k to 40-70k input tokens.
+- **Switching to GPT.** When you switch to a model with a smaller window, Codex first asks the previous model to compact, so Claude writes the summary and GPT receives it. Claude keeps its 750k trigger. Compaction requests are recognised and get a longer limit and one retry.
+- **Long steps.** A step fails only after 180 s without model activity (300 s for compaction) or at a 15 minute cap. Heartbeats are real SSE events, so Codex's idle timer does not cut off a slow step.
+- **Robustness.** A malformed decision or a stream without verifiable usage is retried once. Images in the current turn are passed to Claude. Replies follow the language of the user's own words, not the English context Codex wraps around them.
+- **Guard rails.** Claude runs only through a pinned official CLI (path, version and SHA-256), with a subscription login and no API fallback. Every attempt writes a private receipt with the actual model and session.
+- **Install.** Transactional install and rollback, `NPM_BIN` for machines without npm on `PATH`, and a script that moves one existing chat to the router.
 
-The runner now enables partial SDK events and returns usage from the latest completed primary-model response. It replaces cumulative `message_delta` counters instead of adding them, waits for `message_stop`, and includes cache tokens. Missing or unfinished per-request usage rejects the response as `missing_context_usage`; it never substitutes query totals or a made-up small count. The receipt keeps aggregate `usage` with `usage_scope: "query_pipeline_total"` and separately records `context_usage`. Normal threshold-based compaction remains enabled. See the official [SDK usage guide](https://code.claude.com/docs/en/agent-sdk/cost-tracking) for the distinction between placeholder assistant counters and final stream counters.
+Details, config diff and rollback: [ADAPTATION.md](ADAPTATION.md).
 
-The pinned SDK's per-iteration counters carry no separate model name. They inherit the model already verified on the enclosing primary stream; an explicit conflicting model is rejected. The regression fixtures cover this observed event shape, including cached input.
+## What has been checked
 
-The following results are the earlier budget repair's evidence, not acceptance of the follow-up fix:
+2026-10-06 and 07, macOS arm64, Codex 0.160.1, official Claude Code 2.1.285, Agent SDK 0.3.270, Node 24.
 
-A fresh chat can already carry a large tool description. With this machine's full tool catalog, one real input measured about 391k tokens and later short turns about 480k. The old catalog triggered compaction at 96k. Shortening chat history left the tool prefix in the next request, so the cycle repeated.
-
-Discovery retains the SDK's canonical model resolution. When `sonnet` resolves to `claude-sonnet-5-5`, the catalog uses the 1M window reported by the actual final SDK result, a 750k compaction trigger and a 900k effective window. The same capacity has not been verified for other models; they keep the original budget. This result does not cover every Claude model.
-
-Three real Sonnet turns with the full tool catalog passed without compaction and preserved an earlier marker. All 139 unit/integration tests passed. With deterministic usage and the real Codex consumer, the old catalog compacted twice over three turns; the corrected catalog compacted zero times, and 760k usage still triggered one compaction. These are backend checks, not desktop acceptance after reloading.
-
-Reload Codex after updating an installed catalog so it reads the new budget. Chat history can stay. Existing history, request-size and step-timeout limits still apply.
-
-## What has actually been checked (earlier record)
-
-2026-10-06, macOS arm64, Codex 0.160.0, official Claude Code 2.1.285, Agent SDK 0.3.270.
-
-Real Claude subscription, headless Codex app-server, throwaway home, small cases:
-
-- Read a fixture, then change it and read it back, over two turns in one Codex thread. Real tool events, real output, the file checked on disk, and the first turn's nonce came back in the second.
-- Interrupt mid-request: turn interrupted, request aborted, no stray child processes.
-- One 18,711-character history prompt that asks for an early fact. It's a finite text, not a token measurement or a limit test.
-- Manual compaction on a small chat, then recalling the early fact. It goes through `/responses`, not remote `/responses/compact`. It is not an overflow or auto-compaction test.
-
-GPT: the original login-proxy path worked against real default GPT (one small request). A mock GPT → Claude → GPT switch also passes on 0.160 (deterministic providers, no model calls).
+- 194 unit and integration tests (`npm test`).
+- Real Claude subscription through headless `codex exec`:
+  - A forced compaction: Sonnet summarised 423,417 tokens in 7.7 s and the chat recalled earlier output afterwards.
+  - Claude to GPT in one chat, with GPT's window lowered to 40k in a temporary catalog: Sonnet compacted first, then GPT answered from the earlier history.
+  - Mixed sub-agents, one shell command each: a Claude chat spawned a GPT sub-agent, and a GPT chat spawned `claude_sonnet`.
+- Daily use in the desktop app, including one old chat migrated to the router. This is the maintainer's own use, not a formal acceptance.
 
 Not checked:
 
-- The desktop GUI main chat.
-- Real mixed GPT/Claude subagents on this build. The upstream record is not ours.
-- The read-only sandbox with live Claude. In that run the model refused without trying a tool, so it proves nothing about the sandbox. A mock run did show the real sandbox denying a write.
-- Context overflow, Linux, and any speed comparison.
+- Linux and Windows.
+- Compaction near the 750k trigger; its time is extrapolated from the runs above.
+- The retry and long-heartbeat paths in real use (unit tests only).
+- Larger mixed sub-agent workflows, and the read-only sandbox with live Claude.
 
 ## What you need
 
@@ -105,18 +96,18 @@ Cases: `readwrite`, `cancel`, `readonly`, `compact`, `history`. The report is mo
 Do this only after you've read the concrete config diff and rollback steps in [ADAPTATION.md](ADAPTATION.md):
 
 1. `install`, then `activate-router`, against your real Codex home. It trusts only its own startup hook, by exact hash.
-2. Restart Codex once and start a new chat. Old chats are not migrated; selecting Claude in one doesn't reroute it.
+2. Restart Codex once and start a new chat. Old chats keep their original provider; `scripts/thread_migration.py` can move one chat at a time (see [ADAPTATION.md](ADAPTATION.md)).
 3. Your GPT default stays as it was. `deactivate` and `uninstall` undo the owned changes.
 
 ## What to expect
 
-- Claude's decision is buffered until it's complete. You see Codex's own events when Codex runs a tool. You don't see Claude's hidden thinking or every internal step.
-- Text only. Images, audio, Codex output-schema mode, server-stored response IDs and unknown history item types fail with a clear error.
-- Each step is a fresh SDK query. Continuity comes from Codex's chat history. The SDK session ID of a step is not the Codex thread ID.
-- The final SDK usage for a step can list both Sonnet and Haiku. We haven't established why the CLI uses Haiku, so don't read a run as pure Sonnet. We also can't say what else it costs, and make no promise of no extra usage.
-- No adapter-level retries and no API fallback. A cancel and a refusal are recorded as different things.
+- Claude's decision is buffered until it is complete. You see Codex's own events when Codex runs a tool, not Claude's hidden thinking or every internal step.
+- Text, and images in the current turn. Older images become placeholders. Audio, Codex output-schema mode and server-stored response IDs fail with a clear error.
+- Each step is a fresh SDK query. Continuity comes from Codex's chat history; the SDK session ID of a step is not the Codex thread ID.
+- The final SDK usage for a step can list both the chosen model and Haiku. We haven't established why the CLI uses Haiku, and make no promise about extra usage.
+- Retries are limited to the cases above. There is no API fallback, and a cancel and a refusal are recorded as different things.
 - The guard refuses to run, naming the variable or file, if it finds API-key or route overrides: `ANTHROPIC_*`, OpenAI key or URL variables, helper settings in Claude's settings files, or an Anthropic profile.
-- Each inference attempt writes a private receipt in `<home>/claude-models/receipts` (mode 600). Model names and the session ID come only from the final result, never from the alias or the model's own claim. Cancelled and blocked attempts get receipts too, with nothing filled in.
+- Each inference attempt writes a private receipt in `<home>/claude-models/receipts` (mode 600). Model names and the session ID come only from the final result, never from the alias or the model's own claim.
 
 ## Account terms
 
@@ -130,5 +121,7 @@ npm run typecheck
 npm test
 npm run build
 ```
+
+If npm is not on your `PATH`, set `NPM_BIN` to an npm executable or `npm-cli.js` before `install`.
 
 `npm run test:codex` uses deterministic providers. It checks native tool execution and switching, not live model behaviour or the desktop UI.
