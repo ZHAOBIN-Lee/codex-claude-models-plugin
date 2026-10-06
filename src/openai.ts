@@ -40,3 +40,37 @@ export function forwardedResponseHeaders(headers: Headers): Record<string, strin
   for (const name of (headers.get('connection') ?? '').split(',')) excluded.add(name.trim().toLowerCase());
   return Object.fromEntries([...headers].filter(([name]) => !excluded.has(name)));
 }
+
+// OpenAI-encrypted payloads are Fernet-style base64url tokens.
+const OPENAI_CIPHERTEXT = /^gAAAAA[A-Za-z0-9_-]+=*$/;
+
+/**
+ * Codex's v2 multi-agent protocol stores a spawn/send message in an `encrypted_content` part. When a Claude
+ * parent spawns a GPT sub-agent, that part holds plain text, and OpenAI rejects the whole request with
+ * "Encrypted function output content could not be decrypted or decoded". Turn such parts into ordinary
+ * input_text. Real ciphertext is kept. Returns undefined when nothing needs changing, so the original
+ * bytes are forwarded untouched.
+ */
+export function portableAgentMessages(json: unknown): Buffer | undefined {
+  if (!json || typeof json !== 'object' || !Array.isArray((json as {input?: unknown}).input)) return undefined;
+  let changed = false;
+  const input = ((json as {input: unknown[]}).input).map(item => {
+    if (!item || typeof item !== 'object' || (item as {type?: unknown}).type !== 'agent_message') return item;
+    const content = (item as {content?: unknown}).content;
+    if (!Array.isArray(content)) return item;
+    let local = false;
+    const parts = content.map(part => {
+      const p = part as {type?: unknown; encrypted_content?: unknown};
+      if (p && typeof p === 'object' && p.type === 'encrypted_content' && typeof p.encrypted_content === 'string'
+          && !OPENAI_CIPHERTEXT.test(p.encrypted_content)) {
+        local = true;
+        return {type: 'input_text', text: p.encrypted_content};
+      }
+      return part;
+    });
+    if (!local) return item;
+    changed = true;
+    return {...(item as object), content: parts};
+  });
+  return changed ? Buffer.from(JSON.stringify({...(json as object), input})) : undefined;
+}

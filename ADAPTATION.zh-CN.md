@@ -37,13 +37,16 @@ Claude 的决策直接交给 Codex，由 Codex 执行并显示真实的工具调
 
 **Skill 路由。** `plugins/codex-claude-models/skills/claude-models` 只回应明确的安装设置、使用说明和移除请求。可信上下文表明当前模型就是原生 Claude 时，“用 Claude”就是直接用 Codex 原生工具；需要第二意见时派 Claude 子代理角色，不调用外部 CLI。
 
+**Claude 父聊天派 GPT 子代理。** 合并目录把所有模型设成 `multi_agent_version: "v1"`，但桌面 App（0.160.1）实际仍跑 v2 子代理，派发内容放在 `encrypted_content` 字段里。Claude 当父模型时这个字段是明文，OpenAI 会以 “Encrypted function output content could not be decrypted or decoded” 拒绝 GPT 子代理的请求。`src/openai.ts` 里的 `portableAgentMessages` 只把 `agent_message` 中不是 OpenAI 密文的 `encrypted_content` 改成 `input_text`；没有需要改的内容时，原始请求字节原样转发。桌面 App 为什么没用上 v1 设置，目前还没查清。
+
 ## 已验证与未验证
 
 ### 2026-10-07（0.3.0）
 
 macOS arm64，Codex 0.160.1，官方 Claude Code 2.1.285，Agent SDK 0.3.270。
 
-- 195 项测试通过，类型检查和构建通过。设置 `NPM_BIN` 后，安装运行时的测试也能跑。
+- 197 项测试通过，类型检查和构建通过。设置 `NPM_BIN` 后，安装运行时的测试也能跑。
+- 桌面 App：修复明文 `encrypted_content` 之后，Claude 父聊天派出 GPT 子代理（`gpt-6.1-sol`），执行 `pwd && date` 并正常回报。下面那次混合子代理测试用的是无界面的 `codex exec`，没覆盖这条路径。
 - 目录里每个 Claude 模型的窗口都取自 SDK 最终结果（100 万或 20 万）。没核实过或带后缀的 ID 按 20 万处理。
 - 真实 Sonnet 强制压缩：423,417 输入 Token 用 7.7 秒完成摘要，凭证记为 `request_kind: compaction`，之后回忆正确。
 - 同一聊天从 Claude 切到 GPT，临时 catalog 把 GPT 窗口调到 4 万：Codex 的 `ModelDownshift` 压缩在 Sonnet 上执行（70,379 Token，5.9 秒），GPT 再根据摘要作答。

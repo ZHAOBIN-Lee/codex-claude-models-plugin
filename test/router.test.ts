@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import type { AddressInfo } from 'node:net';
 import { bridgeServer } from '../src/server.js';
-import { openaiForwarder, forwardedResponseHeaders, ROUTER_TOKEN_HEADER } from '../src/openai.js';
+import { openaiForwarder, forwardedResponseHeaders, portableAgentMessages, ROUTER_TOKEN_HEADER } from '../src/openai.js';
 import { combinedCatalog } from '../src/catalog.js';
 import { usageFromModels } from '../src/sdk.js';
 
@@ -49,6 +49,43 @@ test('forwarded headers preserve auth and limits while removing hop-by-hop and d
     connection: 'x-hop', 'x-hop': 'discard', 'set-cookie': 'discard', 'content-encoding': 'gzip', 'content-length': '42',
     'x-codex-primary-used-percent': '20'}));
   assert.deepEqual(headers, {'www-authenticate': 'Bearer', 'retry-after': '3', 'x-codex-primary-used-percent': '20'});
+});
+
+test('plain-text agent messages from a Claude parent become input_text; real OpenAI ciphertext is kept', () => {
+  const cipher = 'gAAAAABqv_sE' + 'A'.repeat(40) + '==';
+  const request = {model: 'gpt-test', stream: true, input: [
+    {type: 'message', role: 'user', content: [{type: 'input_text', text: 'hi'}]},
+    {type: 'agent_message', author: '/root', recipient: '/root/worker', content: [
+      {type: 'input_text', text: 'Message Type: NEW_TASK\nPayload:\n'},
+      {type: 'encrypted_content', encrypted_content: '你是 /root 指派的执行者'}]},
+    {type: 'agent_message', author: '/root', recipient: '/root/other', content: [
+      {type: 'encrypted_content', encrypted_content: cipher}]},
+  ]};
+  const out = JSON.parse(portableAgentMessages(request)!.toString());
+  assert.deepEqual(out.input[1].content[1], {type: 'input_text', text: '你是 /root 指派的执行者'});
+  assert.deepEqual(out.input[1].content[0], request.input[1]!.content![0]);
+  assert.deepEqual(out.input[2], request.input[2]);
+  assert.deepEqual(out.input[0], request.input[0]);
+  assert.equal(out.model, 'gpt-test'); assert.equal(out.stream, true);
+  // Nothing to change: the router must forward the original bytes.
+  assert.equal(portableAgentMessages({model: 'gpt-test', input: [request.input[2]]}), undefined);
+  assert.equal(portableAgentMessages({model: 'gpt-test', input: 'hi'}), undefined);
+  assert.equal(portableAgentMessages(null), undefined);
+});
+
+test('the router forwards a Claude-spawned GPT sub-agent task as plain text', {timeout: 10000}, async t => {
+  const seen: string[] = [];
+  const server = bridgeServer({token: localToken, run: async () => claudeResult,
+    openai: {models: new Set(['gpt-test']), forward: async request => {seen.push(request.body.toString()); return new Response('ok');}}});
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  t.after(() => {server.closeAllConnections(); server.close();});
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/responses`;
+  const body = JSON.stringify({model: 'gpt-test', input: [{type: 'agent_message', author: '/root', recipient: '/root/w',
+    content: [{type: 'encrypted_content', encrypted_content: 'PLAIN_TASK'}]}]});
+  await (await fetch(url, {method: 'POST', headers: auth, body})).text();
+  const forwarded = JSON.parse(seen[0]!);
+  assert.deepEqual(forwarded.input[0].content, [{type: 'input_text', text: 'PLAIN_TASK'}]);
+  assert.ok(!seen[0]!.includes('encrypted_content'));
 });
 
 test('one authenticated router serves GPT passthrough, Claude decisions, and GPT compaction', {timeout: 10000}, async t => {

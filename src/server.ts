@@ -4,7 +4,7 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { BridgeError, isCompactionRequest, requestSchema, preparePrompt, validateDecision, type RunStep } from './contracts.js';
 import { completedResponse, completionEvents, responseEnvelope } from './adapter.js';
-import { ROUTER_TOKEN_HEADER, forwardedResponseHeaders, type ForwardOpenAI } from './openai.js';
+import { ROUTER_TOKEN_HEADER, forwardedResponseHeaders, portableAgentMessages, type ForwardOpenAI } from './openai.js';
 import { VERSION } from './version.js';
 
 export interface ServerOptions {
@@ -70,7 +70,9 @@ export function bridgeServer(options: ServerOptions) {
         if (!routerAuth || legacyAuth) throw new BridgeError(401, 'chatgpt_login_required', 'GPT requests require router authentication and a separate Codex ChatGPT credential.');
         forwarding = true;
         timer = setTimeout(() => controller.abort(), options.openai.idleTimeoutMs ?? 300000);
-        const upstream = await options.openai.forward({path: req.url!, headers: req.headers, body: payload.bytes, signal: controller.signal});
+        // A Claude parent writes plain text where OpenAI expects its own ciphertext; see portableAgentMessages.
+        const forwardBody = portableAgentMessages(payload.json) ?? payload.bytes;
+        const upstream = await options.openai.forward({path: req.url!, headers: req.headers, body: forwardBody, signal: controller.signal});
         res.writeHead(upstream.status, forwardedResponseHeaders(upstream.headers));
         if (!upstream.body) {res.end(); return;}
         const idle = options.openai.idleTimeoutMs ?? 300000;
