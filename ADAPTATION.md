@@ -41,13 +41,15 @@ No SDK execution tools are exposed (only the structured-output tool). Every step
 
 **Concurrency and queueing.** The router allows 6 Claude steps at once (`concurrency`). GPT requests no longer take a slot: after the batch migration every GPT chat and sub-agent went through the router, long GPT streams filled all 6 slots, and the router itself answered `429 busy` to GPT and Claude alike (Codex does not retry, `request_max_retries = 0`). A Claude step over the limit now waits in FIFO order for up to `queueMs` (default 120 s); a streamed request has already received its 200 header and heartbeats, so a timeout arrives as a `response.failed` event with code `busy`.
 
+**Direct native tool calls.** The SDK session runs with `tools: []`, so the only way to use a Codex tool is the structured decision's `calls`. Opus and Sonnet both occasionally called `exec_command`, `apply_patch` or `tool_search` directly. The SDK answered "No such tool available", the permission-denial list stayed empty, and the model then returned a valid decision claiming Codex tools were unavailable. `nativeToolCall` in `src/sdk.ts` now watches the main model's stream (sub-agent frames and `StructuredOutput` are ignored); at the first other `tool_use` the attempt is aborted with code `native_tool_call` and retried once with a note naming the tool. The receipt records `rejected: {code: "native_tool_call", tool}`.
+
 ## What has and hasn't been verified
 
 ### 2026-10-07 (0.3.0)
 
 macOS arm64, Codex 0.160.1, official Claude Code 2.1.285, Agent SDK 0.3.270.
 
-- 200 tests pass; typecheck and build pass. With `NPM_BIN` set, the install-runtime tests run too.
+- 201 tests pass; typecheck and build pass. With `NPM_BIN` set, the install-runtime tests run too.
 - Desktop app: a Claude parent spawned a GPT sub-agent (`gpt-6.1-sol`) that ran `pwd && date` and reported back, after the plain-text `encrypted_content` fix. The earlier mixed sub-agent check below used headless `codex exec` and did not cover this path.
 - Every Claude model in the catalog had its window read from the final SDK result (1M or 200k). Unverified or suffixed IDs fall back to 200k.
 - Forced compaction on real Sonnet: 423,417 input tokens summarised in 7.7 s, receipt `request_kind: compaction`, correct recall afterwards.

@@ -18,6 +18,7 @@
 - **稳健性。** 格式错误的决策、或拿不到可核实用量的流会重试一次。当前回合的图片会交给 Claude。回复语言按用户自己写的文字判断，不受 Codex 包在外面的英文内容影响。
 - **Claude 派 GPT 子代理。** 桌面 App 用的是 Codex 的 v2 子代理协议，任务内容放在 `encrypted_content` 字段里。Claude 当主模型时这里是明文，OpenAI 会拒绝 GPT 子代理的第一个请求，报 “Encrypted function output content could not be decrypted or decoded”。现在 router 转发前会把这类明文字段改成普通文本；真正的 OpenAI 密文（`gAAAAA…`）和其他 GPT 请求都原样转发。
 - **并发。** 只有 Claude 步骤计入 6 个的上限，因为每一步都要启动一个 Claude Code 进程。GPT 请求只做转发，router 不限制它们；以前把它们也算进去，所有聊天都走 router 后就出现了本地的 `429 Too Many Requests`。超出上限的 Claude 步骤会排队（流式请求排队时持续收到心跳），等满 2 分钟仍没有空位才报 `busy`。
+- **直接调用工具。** Claude SDK 会话里没有原生工具，Codex 工具要写进回复的 `calls`。Claude 偶尔仍会直接调用 `exec_command`、`apply_patch`，收到 “No such tool available” 后告诉用户工具坏了。现在 router 发现第一次直接调用就中断这一步，并带上写明工具名的提示重试一次。
 - **安全边界。** Claude 只通过固定的官方 CLI 运行（路径、版本和 SHA-256 都核对），要求订阅登录，没有 API 回退。每次调用都写一份私有凭证，记录实际模型和会话。
 - **安装。** 安装和回退是事务式的；`PATH` 里没有 npm 时可用 `NPM_BIN` 指定；另有脚本可以把一个或全部已有聊天迁移到 router，带备份和回退（见 [MIGRATION.zh-CN.md](MIGRATION.zh-CN.md)）。
 
@@ -27,7 +28,7 @@
 
 2026-10-06 至 07，macOS arm64，Codex 0.160.1，官方 Claude Code 2.1.285，Agent SDK 0.3.270，Node 24。
 
-- 200 项单元和集成测试（`npm test`）。
+- 201 项单元和集成测试（`npm test`）。
 - 通过无界面的 `codex exec` 使用真实 Claude 订阅：
   - 强制压缩一次：Sonnet 压缩 423,417 Token 用了 7.7 秒，之后聊天能正确回忆前面的输出。
   - 同一个聊天从 Claude 切到 GPT，临时 catalog 把 GPT 窗口调到 4 万：先由 Sonnet 压缩，GPT 再根据前面的历史作答。

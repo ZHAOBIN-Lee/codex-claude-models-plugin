@@ -6,7 +6,7 @@ import path from 'node:path';
 import { completedResponse, responseEnvelope } from '../src/adapter.js';
 import { BridgeError, outputSchemaFor, preparePrompt, requestSchema, validateDecision } from '../src/contracts.js';
 import { sdkRunner, usageFromModels } from '../src/sdk.js';
-import { usageStream, USAGE_MODEL, USAGE_SESSION, type Frame } from './sdk-usage-fixtures.js';
+import { usageEvent, usageStream, USAGE_MODEL, USAGE_SESSION, type Frame } from './sdk-usage-fixtures.js';
 
 const exec = {type: 'function', name: 'exec_command', parameters: {type: 'object', properties: {cmd: {type: 'string'}}}};
 const patch = {type: 'custom', name: 'apply_patch', format: {type: 'text'}};
@@ -113,4 +113,39 @@ test('a valid first decision makes one query and records no rejection', async t 
   const receipt = await f.receipt();
   assert.equal(receipt.attempts, 1);
   assert.equal(receipt.rejected, null);
+});
+
+test('a direct native tool call is cut off and retried once with a note naming the tool', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'native-call-retry-'));
+  t.after(() => fs.rm(root, {recursive: true, force: true}));
+  const prompts: unknown[] = [];
+  let wroteWrongAnswer = false;
+  const toolStart = (name: string, parent: string | null = null) => usageEvent({type: 'content_block_start', index: 0,
+    content_block: {type: 'tool_use', id: `toolu_${name}`, name, input: {}}}, parent);
+  const fake = ((args: any) => Object.assign((async function* () {
+    for await (const message of args.prompt) prompts.push(message.message.content);
+    if (prompts.length === 1) {
+      yield toolStart('exec_command');
+      wroteWrongAnswer = true;
+      yield finalResult({text: 'tools are unavailable', calls: []});
+      return;
+    }
+    // Real SDK streams deliver the decision through StructuredOutput, and a sub-agent's own calls carry a parent id.
+    yield toolStart('Bash', 'toolu_parent');
+    for (const frame of usageStream('msg_2', {input_tokens: 10, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 5})) yield frame;
+    yield toolStart('StructuredOutput');
+    yield finalResult(good);
+  })(), {accountInfo: async () => ({apiProvider: 'firstParty', subscriptionType: 'pro'}), close() {}})) as unknown as Parameters<typeof sdkRunner>[2];
+  const run = sdkRunner(root, models, fake, {receiptsDir: root, guard: async () => ({coverage: 'test_injected'})});
+  const result = await run(request, new AbortController().signal);
+  assert.equal(result.decision.calls[0]?.name, 'exec_command');
+  assert.equal(wroteWrongAnswer, false, 'the first attempt is stopped at the direct call');
+  assert.equal(prompts.length, 2);
+  const note = String((prompts[1] as {text?: string}[]).at(-1)?.text);
+  assert.match(note, /rejected by the adapter \(native_tool_call on exec_command\)/);
+  assert.match(note, /calls array/);
+  const receipt = JSON.parse(await fs.readFile(path.join(root, (await fs.readdir(root)).find(n => n.endsWith('.json'))!), 'utf8'));
+  assert.equal(receipt.status, 'complete');
+  assert.equal(receipt.attempts, 2);
+  assert.deepEqual(receipt.rejected, {code: 'native_tool_call', tool: 'exec_command'});
 });

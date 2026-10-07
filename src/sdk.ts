@@ -107,7 +107,27 @@ export async function inspectSdk(cwd: string, runtime: RuntimeOptions = {}, quer
   }
 }
 
-const RETRYABLE_DECISIONS = new Set(['invalid_decision', 'invalid_arguments', 'unknown_tool', 'tool_choice', 'parallel_calls', 'empty_decision']);
+const RETRYABLE_DECISIONS = new Set(['invalid_decision', 'invalid_arguments', 'unknown_tool', 'tool_choice', 'parallel_calls', 'empty_decision', 'native_tool_call']);
+
+// The SDK session has no native tools (tools: []); every Codex tool belongs in the structured decision's calls.
+// A model that calls exec_command, apply_patch or tool_search directly gets "No such tool available", then tends to
+// report that Codex tools are broken. Returns the tool name of such a call by the main model, if any.
+export function nativeToolCall(message: Record<string, unknown>): string | undefined {
+  if (message.parent_tool_use_id != null) return undefined;
+  const named = (block: unknown) => {
+    const b = block as {type?: unknown; name?: unknown} | null | undefined;
+    return b && b.type === 'tool_use' && typeof b.name === 'string' && b.name !== 'StructuredOutput' ? b.name.slice(0, 80) : undefined;
+  };
+  if (message.type === 'stream_event') {
+    const event = message.event as {type?: unknown; content_block?: unknown} | undefined;
+    return event?.type === 'content_block_start' ? named(event.content_block) : undefined;
+  }
+  if (message.type === 'assistant') {
+    const content = (message.message as {content?: unknown} | undefined)?.content;
+    if (Array.isArray(content)) for (const block of content) {const name = named(block); if (name) return name;}
+  }
+  return undefined;
+}
 // A stream without verifiable per-request usage is retried once with the unchanged prompt instead of withholding the turn.
 const RETRY_WITHOUT_NOTE = new Set(['missing_context_usage']);
 // Names the rejected call and the rule only; the rejected arguments are not echoed or stored.
@@ -184,6 +204,12 @@ export function sdkRunner(cwd: string, models: ClaudeModel[], queryImpl: typeof 
         // Thinking and output arrive as frequent stream events (measured gaps under 2 s at high effort).
         progress();
         if (message.type === 'result') {final = message; stage = 'final_received'; break;}
+        // Stop at the first direct tool call instead of waiting for an answer built on "No such tool available".
+        const direct = nativeToolCall(message);
+        if (direct) {
+          throw new BridgeError(502, 'native_tool_call', `Claude called ${direct} as a native tool instead of returning it in calls.`, {tool: direct,
+            reason: `You called "${direct}" as a native tool. This session has no native tools, so that call failed with "No such tool available" and nothing was executed; Codex tools still work. Put every Codex tool request in the calls array of the structured decision.`});
+        }
         contextTracker.observe(message);
       }
       if (!final) throw new BridgeError(502, 'incomplete_sdk', 'Claude SDK ended without a result.');
