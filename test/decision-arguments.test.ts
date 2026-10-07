@@ -115,37 +115,58 @@ test('a valid first decision makes one query and records no rejection', async t 
   assert.equal(receipt.rejected, null);
 });
 
-test('a direct native tool call is cut off and retried once with a note naming the tool', async t => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'native-call-retry-'));
+const toolStart = (name: string, parent: string | null = null) => usageEvent({type: 'content_block_start', index: 0,
+  content_block: {type: 'tool_use', id: `toolu_${name}`, name, input: {}}}, parent);
+
+// Each attempt: optional direct native call, normal usage frames, the StructuredOutput call, then the final result.
+async function nativeScript(t: TestContext, attempts: {native?: string; subagent?: boolean; output: unknown}[]) {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'native-call-'));
   t.after(() => fs.rm(root, {recursive: true, force: true}));
   const prompts: unknown[] = [];
-  let wroteWrongAnswer = false;
-  const toolStart = (name: string, parent: string | null = null) => usageEvent({type: 'content_block_start', index: 0,
-    content_block: {type: 'tool_use', id: `toolu_${name}`, name, input: {}}}, parent);
   const fake = ((args: any) => Object.assign((async function* () {
     for await (const message of args.prompt) prompts.push(message.message.content);
-    if (prompts.length === 1) {
-      yield toolStart('exec_command');
-      wroteWrongAnswer = true;
-      yield finalResult({text: 'tools are unavailable', calls: []});
-      return;
-    }
-    // Real SDK streams deliver the decision through StructuredOutput, and a sub-agent's own calls carry a parent id.
-    yield toolStart('Bash', 'toolu_parent');
-    for (const frame of usageStream('msg_2', {input_tokens: 10, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 5})) yield frame;
+    const step = attempts[prompts.length - 1]!;
+    if (step.subagent) yield toolStart('Bash', 'toolu_parent');
+    if (step.native) yield toolStart(step.native);
+    for (const frame of usageStream(`msg_${prompts.length}`, {input_tokens: 10, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 5})) yield frame;
     yield toolStart('StructuredOutput');
-    yield finalResult(good);
+    yield finalResult(step.output);
   })(), {accountInfo: async () => ({apiProvider: 'firstParty', subscriptionType: 'pro'}), close() {}})) as unknown as Parameters<typeof sdkRunner>[2];
   const run = sdkRunner(root, models, fake, {receiptsDir: root, guard: async () => ({coverage: 'test_injected'})});
-  const result = await run(request, new AbortController().signal);
+  const receipt = async () => JSON.parse(await fs.readFile(path.join(root, (await fs.readdir(root)).find(n => n.endsWith('.json'))!), 'utf8'));
+  return {run: () => run(request, new AbortController().signal), prompts, receipt};
+}
+const broken = {text: 'Codex tools are unavailable', calls: []};
+
+test('a direct native call the model recovers from in the same query is accepted without a retry', async t => {
+  const f = await nativeScript(t, [{native: 'exec_command', subagent: true, output: good}]);
+  const result = await f.run();
   assert.equal(result.decision.calls[0]?.name, 'exec_command');
-  assert.equal(wroteWrongAnswer, false, 'the first attempt is stopped at the direct call');
-  assert.equal(prompts.length, 2);
-  const note = String((prompts[1] as {text?: string}[]).at(-1)?.text);
+  assert.equal(f.prompts.length, 1);
+  const receipt = await f.receipt();
+  assert.equal(receipt.attempts, 1);
+  assert.equal(receipt.rejected, null);
+});
+
+test('an answer with no calls after a direct native call is retried once; the note says earlier results are real', async t => {
+  const f = await nativeScript(t, [{native: 'exec_command', output: broken}, {output: good}]);
+  const result = await f.run();
+  assert.equal(result.decision.calls[0]?.name, 'exec_command');
+  assert.equal(f.prompts.length, 2);
+  const note = String((f.prompts[1] as {text?: string}[]).at(-1)?.text);
   assert.match(note, /rejected by the adapter \(native_tool_call on exec_command\)/);
-  assert.match(note, /calls array/);
-  const receipt = JSON.parse(await fs.readFile(path.join(root, (await fs.readdir(root)).find(n => n.endsWith('.json'))!), 'utf8'));
+  assert.match(note, /every tool result already in the conversation was really executed/);
+  assert.doesNotMatch(note, /nothing was executed/);
+  const receipt = await f.receipt();
   assert.equal(receipt.status, 'complete');
   assert.equal(receipt.attempts, 2);
   assert.deepEqual(receipt.rejected, {code: 'native_tool_call', tool: 'exec_command'});
+});
+
+test('the retry is never rejected for a native call, so the turn does not fail', async t => {
+  const f = await nativeScript(t, [{native: 'exec_command', output: broken}, {native: 'exec_command', output: {text: 'final answer', calls: []}}]);
+  const result = await f.run();
+  assert.equal(result.decision.text, 'final answer');
+  assert.equal(f.prompts.length, 2);
+  assert.equal((await f.receipt()).status, 'complete');
 });

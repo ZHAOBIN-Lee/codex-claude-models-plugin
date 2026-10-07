@@ -41,7 +41,7 @@ Claude 的决策直接交给 Codex，由 Codex 执行并显示真实的工具调
 
 **并发与排队。** router 同时最多跑 6 个 Claude 步骤（`concurrency`）。GPT 请求不再占名额：批量迁移后所有 GPT 聊天和子代理都经过 router，长时间的 GPT 流式输出占满了 6 个名额，router 自己对 GPT 和 Claude 都返回了 `429 busy`（Codex 不重试，`request_max_retries = 0`）。现在超出上限的 Claude 步骤按先来后到排队，最多等 `queueMs`（默认 120 秒）；流式请求已经收到 200 响应头和心跳，所以超时会以 `response.failed`、代码 `busy` 的事件返回。
 
-**直接调用原生工具。** SDK 会话以 `tools: []` 运行，使用 Codex 工具的唯一方式是结构化回复里的 `calls`。Opus 和 Sonnet 都偶尔会直接调用 `exec_command`、`apply_patch` 或 `tool_search`。SDK 返回 “No such tool available”，权限拒绝列表仍为空，模型随后交回一份格式合法、却声称 Codex 工具不可用的回复。现在 `src/sdk.ts` 里的 `nativeToolCall` 会检查主模型的消息流（忽略子代理内部的调用和 `StructuredOutput`）；一旦出现其他 `tool_use`，就以代码 `native_tool_call` 中断这次尝试，并带上写明工具名的提示重试一次。凭证里记录为 `rejected: {code: "native_tool_call", tool}`。
+**直接调用原生工具。** SDK 会话以 `tools: []` 运行，使用 Codex 工具的唯一方式是结构化回复里的 `calls`。Opus 和 Sonnet 都偶尔会直接调用 `exec_command`、`apply_patch` 或 `tool_search`。SDK 返回 “No such tool available”，权限拒绝列表仍为空，模型随后交回一份格式合法、却声称 Codex 工具不可用的回复。`src/sdk.ts` 里的 `nativeToolCall` 会检查主模型的消息流（忽略子代理内部的调用和 `StructuredOutput`）。第一版一发现直接调用就中断这次尝试；实际使用中，这类步骤大多已经在同一次查询里把调用写进 `calls` 自行改正，中断反而让耗时翻倍，提示里的 “nothing was executed” 还让 Sonnet 把同一条命令重跑了八次，连续两次被拦截时整轮直接失败。现在回复里有 `calls` 就直接保留；只有首次尝试在直接调用之后交回没有 `calls` 的回复，才以代码 `native_tool_call` 重试一次，提示说明已有的工具结果都是真实的；重试那一次不会再因此被拒。凭证里记录为 `rejected: {code: "native_tool_call", tool}`。
 
 ## 已验证与未验证
 
@@ -49,7 +49,7 @@ Claude 的决策直接交给 Codex，由 Codex 执行并显示真实的工具调
 
 macOS arm64，Codex 0.160.1，官方 Claude Code 2.1.285，Agent SDK 0.3.270。
 
-- 201 项测试通过，类型检查和构建通过。设置 `NPM_BIN` 后，安装运行时的测试也能跑。
+- 203 项测试通过，类型检查和构建通过。设置 `NPM_BIN` 后，安装运行时的测试也能跑。
 - 桌面 App：修复明文 `encrypted_content` 之后，Claude 父聊天派出 GPT 子代理（`gpt-6.1-sol`），执行 `pwd && date` 并正常回报。下面那次混合子代理测试用的是无界面的 `codex exec`，没覆盖这条路径。
 - 目录里每个 Claude 模型的窗口都取自 SDK 最终结果（100 万或 20 万）。没核实过或带后缀的 ID 按 20 万处理。
 - 真实 Sonnet 强制压缩：423,417 输入 Token 用 7.7 秒完成摘要，凭证记为 `request_kind: compaction`，之后回忆正确。

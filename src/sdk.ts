@@ -186,6 +186,8 @@ export function sdkRunner(cwd: string, models: ClaudeModel[], queryImpl: typeof 
     const attempt = async (options: Options, note: string) => {
       closeSession(); closed = false; final = undefined;
       let permitted = false;
+      // First direct native tool call by the main model in this query, if any.
+      let direct: string | undefined;
       const authenticated = new Promise<void>(resolve => {release = resolve;});
       const contextTracker = new ContextUsageTracker(model);
       const content = promptContent(prepared);
@@ -204,12 +206,7 @@ export function sdkRunner(cwd: string, models: ClaudeModel[], queryImpl: typeof 
         // Thinking and output arrive as frequent stream events (measured gaps under 2 s at high effort).
         progress();
         if (message.type === 'result') {final = message; stage = 'final_received'; break;}
-        // Stop at the first direct tool call instead of waiting for an answer built on "No such tool available".
-        const direct = nativeToolCall(message);
-        if (direct) {
-          throw new BridgeError(502, 'native_tool_call', `Claude called ${direct} as a native tool instead of returning it in calls.`, {tool: direct,
-            reason: `You called "${direct}" as a native tool. This session has no native tools, so that call failed with "No such tool available" and nothing was executed; Codex tools still work. Put every Codex tool request in the calls array of the structured decision.`});
-        }
+        direct ??= nativeToolCall(message);
         contextTracker.observe(message);
       }
       if (!final) throw new BridgeError(502, 'incomplete_sdk', 'Claude SDK ended without a result.');
@@ -224,7 +221,15 @@ export function sdkRunner(cwd: string, models: ClaudeModel[], queryImpl: typeof 
         throw new BridgeError(502, 'missing_result_metadata', 'Claude SDK returned no verifiable model, session or usage. The answer was discarded.');
       }
       context = contextTracker.finish(final);
-      return {decision: validateDecision(final.structured_output, request), usage: context.usage};
+      const decision = validateDecision(final.structured_output, request);
+      // A direct native call usually fails with "No such tool available" and the model recovers in the same query by
+      // returning the call in calls; that answer is kept. Aborting those steps doubled latency and made a long chat fail.
+      // Only a first-attempt answer with no calls after a direct call may rest on the failed call, so it is retried once.
+      if (direct && !decision.calls.length && attempts === 1) {
+        throw new BridgeError(502, 'native_tool_call', `Claude called ${direct} as a native tool and then returned no calls.`, {tool: direct,
+          reason: `During this step you called "${direct}" as a native tool. This session has no native tools, so only that one direct call failed with "No such tool available". Codex tools work normally, and every tool result already in the conversation was really executed and is valid. If you still need a tool, put the request in the calls array of the structured decision; otherwise answer from the existing results.`});
+      }
+      return {decision, usage: context.usage};
     };
     try {
       verified = await raceAbort(guardRuntime(cwd, runtime, abortController.signal), abortController.signal);
