@@ -23,6 +23,7 @@ This is a modified version of [Reidond/codex-claude-models-plugin](https://githu
 - **Parallel sub-agents.** When `spawn_agent` is offered, Claude is told to spawn independent sub-agents together: several `spawn_agent` calls in one decision, up to the free concurrency slots, then wait for all of them. Sub-agents that edit files run in parallel only when their file sets do not overlap. Before this, every Claude parent in the maintainer's chats spawned exactly one sub-agent per step.
 - **Image generation.** Codex sends `/v1/images/generations` and `/v1/images/edits` to the active provider. After all chats were migrated to the router, these returned 404 because the router only forwarded `/v1/responses`. They are now proxied byte for byte (including multipart edits) to the matching ChatGPT backend routes with your own Codex login, without a model-catalog check.
 - **Restarts and timeouts.** Stopping the router now drains: it refuses new connections at once, lets Claude and GPT requests in flight finish (up to 16 min), then exits; a second signal exits immediately. A Claude step with xhigh/max effort or a large request (about 1.2 MB or more) may stay silent for 300 s instead of 180 s. Receipts record a router timeout as `timeout_stall`/`timeout_hard` (no longer as a user cancel) with `last_event` and `last_event_age_ms`. A GPT request that cannot reach OpenAI now fails as `openai_upstream_failed` or `openai_idle_timeout` instead of the generic "Claude bridge failed".
+- **Dropped GPT streams.** The router provider now sets `stream_max_retries = 3` (request retries stay 0), so Codex reconnects when OpenAI drops a GPT stream mid-response ("error decoding response body"), as Codex's built-in OpenAI provider did before migration. Reinstalling replaces the old value without a conflict. A Claude step dropped mid-stream may now run once more.
 - **Install.** Transactional install and rollback, `NPM_BIN` for machines without npm on `PATH`, and scripts that move one or all existing chats to the router, with backup and rollback ([MIGRATION.md](MIGRATION.md)).
 
 Details, config diff and rollback: [ADAPTATION.md](ADAPTATION.md).
@@ -31,7 +32,7 @@ Details, config diff and rollback: [ADAPTATION.md](ADAPTATION.md).
 
 2026-10-06 and 07, macOS arm64, Codex 0.160.1, official Claude Code 2.1.285, Agent SDK 0.3.270, Node 24.
 
-- 210 unit and integration tests (`npm test`). On Codex 0.162.0-alpha.2 the native single-chat migration test is refused by the version gate, which only accepts tested versions (0.160.0, 0.160.1).
+- 211 unit and integration tests (`npm test`). On Codex 0.162.0-alpha.2 the native single-chat migration test is refused by the version gate, which only accepts tested versions (0.160.0, 0.160.1).
 - Real Claude subscription through headless `codex exec`:
   - A forced compaction: Sonnet summarised 423,417 tokens in 7.7 s and the chat recalled earlier output afterwards.
   - Claude to GPT in one chat, with GPT's window lowered to 40k in a temporary catalog: Sonnet compacted first, then GPT answered from the earlier history.

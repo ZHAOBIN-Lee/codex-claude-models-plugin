@@ -23,6 +23,7 @@
 - **并行子代理。** 本步提供 `spawn_agent` 时，系统提示会要求 Claude 把互不依赖的子代理一起派出：在同一次回复里放多个 `spawn_agent`，数量不超过空闲的并发名额，再一起等待。会改文件的子代理只有在改动文件不重叠时才并行。改之前，维护者聊天里的 Claude 每一步都只派一个子代理。
 - **生图。** Codex 会把 `/v1/images/generations` 和 `/v1/images/edits` 发给当前 provider。全部聊天迁移到 router 后，这两条请求返回 404，因为 router 只转发 `/v1/responses`。现在它们会用你自己的 Codex 登录原样转发（包括 multipart 格式的编辑请求）到对应的 ChatGPT 后端地址，不检查模型目录。
 - **重启与超时。** 停止 router 时会先排空：立刻拒绝新连接，等正在进行的 Claude 和 GPT 请求跑完（最多 16 分钟）再退出；再发一次停止信号会立即退出。强度为 xhigh/max 或请求较大（约 1.2 MB 以上）的 Claude 步骤，空闲上限从 180 秒放宽到 300 秒。调用凭证会把 router 超时记为 `timeout_stall`/`timeout_hard`（不再记成用户取消），并记录 `last_event` 和 `last_event_age_ms`。GPT 请求连不上 OpenAI 时，报错改为 `openai_upstream_failed` 或 `openai_idle_timeout`，不再显示“Claude bridge failed”。
+- **GPT 流中途断开。** router provider 现在设 `stream_max_retries = 3`（请求重试仍为 0）。OpenAI 在 GPT 输出途中断开（“error decoding response body”）时，Codex 会自动重连，和迁移前内置 OpenAI provider 的行为一致。重装会直接替换旧值，不报冲突。代价是 Claude 步骤中途断开时可能多跑一次。
 - **安装。** 安装和回退是事务式的；`PATH` 里没有 npm 时可用 `NPM_BIN` 指定；另有脚本可以把一个或全部已有聊天迁移到 router，带备份和回退（见 [MIGRATION.zh-CN.md](MIGRATION.zh-CN.md)）。
 
 细节、配置差异和回退见 [ADAPTATION.zh-CN.md](ADAPTATION.zh-CN.md)。
@@ -31,7 +32,7 @@
 
 2026-10-06 至 07，macOS arm64，Codex 0.160.1，官方 Claude Code 2.1.285，Agent SDK 0.3.270，Node 24。
 
-- 210 项单元和集成测试（`npm test`）。在 Codex 0.162.0-alpha.2 上，单聊天迁移的真机测试会被版本检查拒绝，因为它只接受测过的 0.160.0 和 0.160.1。
+- 211 项单元和集成测试（`npm test`）。在 Codex 0.162.0-alpha.2 上，单聊天迁移的真机测试会被版本检查拒绝，因为它只接受测过的 0.160.0 和 0.160.1。
 - 通过无界面的 `codex exec` 使用真实 Claude 订阅：
   - 强制压缩一次：Sonnet 压缩 423,417 Token 用了 7.7 秒，之后聊天能正确回忆前面的输出。
   - 同一个聊天从 Claude 切到 GPT，临时 catalog 把 GPT 窗口调到 4 万：先由 Sonnet 压缩，GPT 再根据前面的历史作答。

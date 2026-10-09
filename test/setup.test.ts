@@ -90,6 +90,31 @@ test('v0.1 upgrade enables a combined picker while preserving the default model 
   assert.deepEqual(config, {...original, apps: {example: {enabled: false, user_edit: 'retained'}}});
 });
 
+test('reinstalling over an older router with stream retries off turns them on without a conflict', {timeout: 10000}, async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-router-retries-'));
+  t.after(() => fs.rm(root, {recursive: true, force: true}));
+  const p = locations(root);
+  await fs.writeFile(p.config, 'model = "gpt-original"\n');
+  await fs.mkdir(p.root, {recursive: true, mode: 0o700});
+  await fs.writeFile(p.token, 'local-router-token', {mode: 0o600});
+  const openai = {models: [{slug: 'gpt-original', priority: 0}]};
+  await withLock(p, () => installConfig(p, models, 47842, openai));
+  await activateRouter(p);
+  // Recreate what 0.3.0 wrote: stream retries off in both the saved state and config.toml.
+  const state = JSON.parse(await fs.readFile(p.state, 'utf8'));
+  state.routerProvider.stream_max_retries = 0;
+  await fs.writeFile(p.state, JSON.stringify(state));
+  let config = TOML.parse(await fs.readFile(p.config, 'utf8')) as any;
+  config.model_providers.codex_model_router.stream_max_retries = 0;
+  await fs.writeFile(p.config, TOML.stringify(config));
+  await withLock(p, () => installConfig(p, models, 47842, openai));
+  config = TOML.parse(await fs.readFile(p.config, 'utf8')) as any;
+  assert.equal(config.model_providers.codex_model_router.stream_max_retries, 3);
+  assert.equal(config.model_providers.codex_model_router.request_max_retries, 0);
+  assert.equal(config.model_providers.claude_agent_sdk.stream_max_retries, 0);
+  assert.equal(config.model_provider, 'codex_model_router');
+});
+
 test('switching provider modes releases ownership of settings no longer changed by that mode', {timeout: 10000}, async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-router-modes-'));
   t.after(() => fs.rm(root, {recursive: true, force: true}));

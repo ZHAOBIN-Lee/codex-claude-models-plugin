@@ -112,8 +112,10 @@ function provider(p: Paths, port: number) {
     auth: {command: process.execPath, args: [path.join(p.root, 'setup.mjs'), 'token', '--codex-home', p.home], timeout_ms: 15000, refresh_interval_ms: 60000}};
 }
 function routerProvider(port: number, token: string) {
+  // Stream retries reconnect a GPT stream that OpenAI drops mid-response ("error decoding response body"); before migration
+  // Codex's built-in OpenAI provider did this. Request retries stay off so a busy or failed Claude step is not re-run.
   return {name: 'Codex + Claude Router', base_url: `http://127.0.0.1:${port}/v1`, wire_api: 'responses',
-    requires_openai_auth: true, supports_websockets: false, request_max_retries: 0, stream_max_retries: 0,
+    requires_openai_auth: true, supports_websockets: false, request_max_retries: 0, stream_max_retries: 3,
     http_headers: {'X-Codex-Router-Token': token}};
 }
 function startupHook(p: Paths) {
