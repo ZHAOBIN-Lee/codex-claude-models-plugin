@@ -88,6 +88,49 @@ test('the router forwards a Claude-spawned GPT sub-agent task as plain text', {t
   assert.ok(!seen[0]!.includes('encrypted_content'));
 });
 
+test('image generation and edit requests are proxied byte for byte to the OpenAI image routes', {timeout: 10000}, async t => {
+  const seen: {path: string; body: Buffer; type?: string}[] = [];
+  let claudeCalls = 0;
+  const server = bridgeServer({token: localToken, run: async () => {claudeCalls++; return claudeResult;},
+    openai: {models: new Set(['gpt-test']), forward: async request => {
+      seen.push({path: request.path, body: request.body, type: String(request.headers['content-type'])});
+      return new Response('{"data":[{"b64_json":"aW1n"}]}', {headers: {'content-type': 'application/json'}});
+    }}});
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  t.after(() => {server.closeAllConnections(); server.close();});
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/images`;
+  // The image model is not in the chat catalog and must not be rejected as unknown.
+  const generate = await fetch(`${base}/generations`, {method: 'POST', headers: {...auth, 'content-type': 'application/json'},
+    body: '{"model":"gpt-image-2","prompt":"a coin"}'});
+  assert.equal(generate.status, 200);
+  assert.equal((await generate.json()).data[0].b64_json, 'aW1n');
+  const multipart = Buffer.concat([Buffer.from('--b\r\nContent-Disposition: form-data; name="image"; filename="a.png"\r\n\r\n'),
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0xff]), Buffer.from('\r\n--b--\r\n')]);
+  const edit = await fetch(`${base}/edits`, {method: 'POST', headers: {...auth, 'content-type': 'multipart/form-data; boundary=b'}, body: multipart});
+  assert.equal(edit.status, 200); await edit.text();
+  assert.deepEqual(seen.map(s => s.path), ['/v1/images/generations', '/v1/images/edits']);
+  assert.equal(seen[0]!.body.toString(), '{"model":"gpt-image-2","prompt":"a coin"}');
+  assert.deepEqual(seen[1]!.body, multipart);
+  assert.equal(seen[1]!.type, 'multipart/form-data; boundary=b');
+  assert.equal(claudeCalls, 0);
+  // The Claude-only credential cannot reach OpenAI image routes.
+  const legacy = await fetch(`${base}/generations`, {method: 'POST', headers: {authorization: `Bearer ${localToken}`}, body: '{}'});
+  assert.equal(legacy.status, 401);
+  assert.equal(seen.length, 2);
+});
+
+test('image routes are not offered without the GPT router, and the forwarder targets the OpenAI image URLs', {timeout: 10000}, async t => {
+  const server = bridgeServer({token: localToken, run: async () => claudeResult});
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  t.after(() => {server.closeAllConnections(); server.close();});
+  const response = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/images/generations`, {method: 'POST', headers: auth, body: '{}'});
+  assert.equal(response.status, 404);
+  const called: string[] = [];
+  const forward = openaiForwarder((async (url: string | URL | Request) => {called.push(String(url)); return new Response('ok');}) as typeof fetch);
+  for (const path of ['/v1/images/generations', '/v1/images/edits']) await forward({path, headers: auth, body: Buffer.from('{}'), signal: new AbortController().signal});
+  assert.deepEqual(called, ['https://chatgpt.com/backend-api/codex/images/generations', 'https://chatgpt.com/backend-api/codex/images/edits']);
+});
+
 test('long GPT streams do not use Claude concurrency slots', {timeout: 10000}, async t => {
   let release!: () => void;
   const hold = new Promise<void>(resolve => {release = resolve;});

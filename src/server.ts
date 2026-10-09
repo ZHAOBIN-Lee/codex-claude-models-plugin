@@ -4,7 +4,7 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { BridgeError, isCompactionRequest, requestSchema, preparePrompt, validateDecision, type RunStep } from './contracts.js';
 import { completedResponse, completionEvents, responseEnvelope } from './adapter.js';
-import { ROUTER_TOKEN_HEADER, forwardedResponseHeaders, portableAgentMessages, type ForwardOpenAI } from './openai.js';
+import { IMAGE_ROUTES, ROUTER_TOKEN_HEADER, forwardedResponseHeaders, portableAgentMessages, type ForwardOpenAI } from './openai.js';
 import { VERSION } from './version.js';
 
 export interface ServerOptions {
@@ -14,7 +14,7 @@ export interface ServerOptions {
   openai?: {models: ReadonlySet<string>; forward: ForwardOpenAI; idleTimeoutMs?: number};
 }
 
-async function body(request: IncomingMessage, maxBytes: number) {
+async function rawBody(request: IncomingMessage, maxBytes: number) {
   if (Number(request.headers['content-length'] ?? 0) > maxBytes) {
     request.resume();
     throw new BridgeError(413, 'body_limit', 'Request exceeds the bridge body limit.');
@@ -26,7 +26,11 @@ async function body(request: IncomingMessage, maxBytes: number) {
     if (size > maxBytes) throw new BridgeError(413, 'body_limit', 'Request exceeds the bridge body limit.');
     parts.push(Buffer.from(chunk));
   }
-  const bytes = Buffer.concat(parts);
+  return Buffer.concat(parts);
+}
+
+async function body(request: IncomingMessage, maxBytes: number) {
+  const bytes = await rawBody(request, maxBytes);
   try { return {bytes, json: JSON.parse(bytes.toString('utf8')) as unknown}; }
   catch { throw new BridgeError(400, 'invalid_json', 'Request body is not valid JSON.'); }
 }
@@ -80,28 +84,38 @@ export function bridgeServer(options: ServerOptions) {
         res.writeHead(200, {'content-type': 'application/json'}).end(JSON.stringify({service: 'codex-claude-models', version: VERSION, pid: process.pid}));
         return;
       }
-      if (req.method !== 'POST' || !['/v1/responses', '/v1/responses/compact'].includes(req.url ?? '')) throw new BridgeError(404, 'not_found', 'Endpoint not found.');
+      const imageRoute = IMAGE_ROUTES.has(req.url ?? '');
+      if (req.method !== 'POST' || !(imageRoute || ['/v1/responses', '/v1/responses/compact'].includes(req.url ?? ''))) throw new BridgeError(404, 'not_found', 'Endpoint not found.');
       if (req.headers['content-encoding'] && req.headers['content-encoding'] !== 'identity') throw new BridgeError(415, 'content_encoding', 'The router expects uncompressed JSON requests.');
-      // Inline screenshots make long Codex histories large; GPT steps are forwarded as-is and must not be capped below a direct request.
-      const payload = await body(req, options.maxBytes ?? 64 * 1024 * 1024);
-      const model = payload.json && typeof payload.json === 'object' && 'model' in payload.json ? payload.json.model : undefined;
-      if (typeof model !== 'string') throw new BridgeError(400, 'invalid_request', 'A model is required.');
-      if (options.openai?.models.has(model)) {
+      // GPT chat and image requests are a plain proxy to OpenAI with the caller's own ChatGPT credential.
+      const proxy = async (bytes: Buffer) => {
+        if (!options.openai) throw new BridgeError(404, 'not_found', 'Endpoint not found.');
         if (!routerAuth || legacyAuth) throw new BridgeError(401, 'chatgpt_login_required', 'GPT requests require router authentication and a separate Codex ChatGPT credential.');
         forwarding = true;
-        timer = setTimeout(() => controller.abort(), options.openai.idleTimeoutMs ?? 300000);
-        // A Claude parent writes plain text where OpenAI expects its own ciphertext; see portableAgentMessages.
-        const forwardBody = portableAgentMessages(payload.json) ?? payload.bytes;
-        const upstream = await options.openai.forward({path: req.url!, headers: req.headers, body: forwardBody, signal: controller.signal});
+        const idle = options.openai.idleTimeoutMs ?? 300000;
+        timer = setTimeout(() => controller.abort(), idle);
+        const upstream = await options.openai.forward({path: req.url!, headers: req.headers, body: bytes, signal: controller.signal});
         res.writeHead(upstream.status, forwardedResponseHeaders(upstream.headers));
         if (!upstream.body) {res.end(); return;}
-        const idle = options.openai.idleTimeoutMs ?? 300000;
         await pipeline(Readable.fromWeb(upstream.body as import('node:stream/web').ReadableStream), async function* (source) {
           for await (const chunk of source) {
             clearTimeout(timer); timer = setTimeout(() => controller.abort(), idle);
             yield chunk;
           }
         }, res, {signal: controller.signal});
+      };
+      if (imageRoute) {
+        if (!options.openai) throw new BridgeError(404, 'not_found', 'Image generation needs the GPT router.');
+        await proxy(await rawBody(req, options.maxBytes ?? 64 * 1024 * 1024));
+        return;
+      }
+      // Inline screenshots make long Codex histories large; GPT steps are forwarded as-is and must not be capped below a direct request.
+      const payload = await body(req, options.maxBytes ?? 64 * 1024 * 1024);
+      const model = payload.json && typeof payload.json === 'object' && 'model' in payload.json ? payload.json.model : undefined;
+      if (typeof model !== 'string') throw new BridgeError(400, 'invalid_request', 'A model is required.');
+      if (options.openai?.models.has(model)) {
+        // A Claude parent writes plain text where OpenAI expects its own ciphertext; see portableAgentMessages.
+        await proxy(portableAgentMessages(payload.json) ?? payload.bytes);
         return;
       }
       if (!model.startsWith('claude-sdk-') && options.openai) throw new BridgeError(400, 'unknown_model', 'Model is not in the installed router catalog. Run install to refresh it.');

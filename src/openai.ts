@@ -4,7 +4,12 @@ import { BridgeError } from './contracts.js';
 const routes: Record<string, string> = {
   '/v1/responses': 'https://chatgpt.com/backend-api/codex/responses',
   '/v1/responses/compact': 'https://chatgpt.com/backend-api/codex/responses/compact',
+  // Codex image generation sends these to the active provider; before migration they went straight to OpenAI.
+  '/v1/images/generations': 'https://chatgpt.com/backend-api/codex/images/generations',
+  '/v1/images/edits': 'https://chatgpt.com/backend-api/codex/images/edits',
 };
+// Image requests carry an image model (not in the chat catalog) and edits may be multipart, so they are proxied by path, byte for byte.
+export const IMAGE_ROUTES: ReadonlySet<string> = new Set(['/v1/images/generations', '/v1/images/edits']);
 const requestHeaders = new Set(['authorization', 'chatgpt-account-id', 'content-type', 'accept',
   'user-agent', 'originator', 'session-id', 'thread-id', 'x-client-request-id']);
 export const ROUTER_TOKEN_HEADER = 'x-codex-router-token';
