@@ -56,6 +56,15 @@ test('the output schema asks for an arguments object and the prompt explains bot
   assert.match(system, /language of their latest message/);
 });
 
+test('the parallel sub-agent rule appears only when spawn_agent is offered', () => {
+  assert.doesNotMatch(preparePrompt(request).system, /several spawn_agent calls/);
+  const spawn = {type: 'function', name: 'spawn_agent', parameters: {type: 'object', properties: {task_name: {type: 'string'}}}};
+  const withSpawn = requestSchema.parse({model: 'claude-sdk-sonnet', input: 'fixture', tools: [exec, spawn]});
+  const {system} = preparePrompt(withSpawn);
+  assert.match(system, /several spawn_agent calls in the same calls array/);
+  assert.match(system, /file sets do not overlap/);
+});
+
 const models = [{id: 'claude-sdk-sonnet', sdkModel: 'sonnet', resolvedModel: USAGE_MODEL, displayName: 'Fixture', description: '', efforts: ['medium']}];
 const finalResult = (structured: unknown): Frame => ({type: 'result', subtype: 'success', is_error: false, duration_ms: 100, duration_api_ms: 90,
   num_turns: 2, result: '', stop_reason: 'end_turn', total_cost_usd: 0, permission_denials: [],

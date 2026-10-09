@@ -20,6 +20,7 @@
 - **并发。** 只有 Claude 步骤计入 6 个的上限，因为每一步都要启动一个 Claude Code 进程。GPT 请求只做转发，router 不限制它们；以前把它们也算进去，所有聊天都走 router 后就出现了本地的 `429 Too Many Requests`。超出上限的 Claude 步骤会排队（流式请求排队时持续收到心跳），等满 2 分钟仍没有空位才报 `busy`。
 - **直接调用工具。** Claude SDK 会话里没有原生工具，Codex 工具要写进回复的 `calls`。Claude 偶尔仍会直接调用 `exec_command`、`apply_patch`，收到 “No such tool available”。多数时候它在同一步里自己改正，把调用写进 `calls`，这样的回复直接保留。如果它交回的回复没有任何 `calls`（比如说“工具坏了”），router 会带一句提示把这一步重试一次，提示写明工具名，并说明对话里已有的工具结果都是真实执行过的。
 - **安全边界。** Claude 只通过固定的官方 CLI 运行（路径、版本和 SHA-256 都核对），要求订阅登录，没有 API 回退。每次调用都写一份私有凭证，记录实际模型和会话。
+- **并行子代理。** 本步提供 `spawn_agent` 时，系统提示会要求 Claude 把互不依赖的子代理一起派出：在同一次回复里放多个 `spawn_agent`，数量不超过空闲的并发名额，再一起等待。会改文件的子代理只有在改动文件不重叠时才并行。改之前，维护者聊天里的 Claude 每一步都只派一个子代理。
 - **安装。** 安装和回退是事务式的；`PATH` 里没有 npm 时可用 `NPM_BIN` 指定；另有脚本可以把一个或全部已有聊天迁移到 router，带备份和回退（见 [MIGRATION.zh-CN.md](MIGRATION.zh-CN.md)）。
 
 细节、配置差异和回退见 [ADAPTATION.zh-CN.md](ADAPTATION.zh-CN.md)。
@@ -28,7 +29,7 @@
 
 2026-10-06 至 07，macOS arm64，Codex 0.160.1，官方 Claude Code 2.1.285，Agent SDK 0.3.270，Node 24。
 
-- 203 项单元和集成测试（`npm test`）。
+- 204 项单元和集成测试（`npm test`）。在 Codex 0.162.0-alpha.2 上，单聊天迁移的真机测试会被版本检查拒绝，因为它只接受测过的 0.160.0 和 0.160.1。
 - 通过无界面的 `codex exec` 使用真实 Claude 订阅：
   - 强制压缩一次：Sonnet 压缩 423,417 Token 用了 7.7 秒，之后聊天能正确回忆前面的输出。
   - 同一个聊天从 Claude 切到 GPT，临时 catalog 把 GPT 窗口调到 4 万：先由 Sonnet 压缩，GPT 再根据前面的历史作答。

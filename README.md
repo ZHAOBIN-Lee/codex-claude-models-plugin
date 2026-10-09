@@ -20,6 +20,7 @@ This is a modified version of [Reidond/codex-claude-models-plugin](https://githu
 - **Concurrency.** Only Claude steps count toward the limit of 6, because each one runs a Claude Code process. GPT requests are a plain proxy and are never limited by the router; counting them caused local `429 Too Many Requests` once all chats went through the router. An extra Claude step waits in line (streamed requests keep receiving heartbeats) and fails as `busy` only after 2 minutes without a free slot.
 - **Direct tool calls.** The Claude SDK session has no native tools; Codex tools go in the decision's `calls`. Claude sometimes still called `exec_command` or `apply_patch` directly and got "No such tool available". Usually it recovers in the same step and returns the call in `calls`, and that answer is kept. If it instead answers with no `calls` (for example "Codex tools are broken"), the router retries that step once with a note that names the tool and says earlier tool results are real.
 - **Guard rails.** Claude runs only through a pinned official CLI (path, version and SHA-256), with a subscription login and no API fallback. Every attempt writes a private receipt with the actual model and session.
+- **Parallel sub-agents.** When `spawn_agent` is offered, Claude is told to spawn independent sub-agents together: several `spawn_agent` calls in one decision, up to the free concurrency slots, then wait for all of them. Sub-agents that edit files run in parallel only when their file sets do not overlap. Before this, every Claude parent in the maintainer's chats spawned exactly one sub-agent per step.
 - **Install.** Transactional install and rollback, `NPM_BIN` for machines without npm on `PATH`, and scripts that move one or all existing chats to the router, with backup and rollback ([MIGRATION.md](MIGRATION.md)).
 
 Details, config diff and rollback: [ADAPTATION.md](ADAPTATION.md).
@@ -28,7 +29,7 @@ Details, config diff and rollback: [ADAPTATION.md](ADAPTATION.md).
 
 2026-10-06 and 07, macOS arm64, Codex 0.160.1, official Claude Code 2.1.285, Agent SDK 0.3.270, Node 24.
 
-- 203 unit and integration tests (`npm test`).
+- 204 unit and integration tests (`npm test`). On Codex 0.162.0-alpha.2 the native single-chat migration test is refused by the version gate, which only accepts tested versions (0.160.0, 0.160.1).
 - Real Claude subscription through headless `codex exec`:
   - A forced compaction: Sonnet summarised 423,417 tokens in 7.7 s and the chat recalled earlier output afterwards.
   - Claude to GPT in one chat, with GPT's window lowered to 40k in a temporary catalog: Sonnet compacted first, then GPT answered from the earlier history.
