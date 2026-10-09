@@ -107,6 +107,13 @@ export async function inspectSdk(cwd: string, runtime: RuntimeOptions = {}, quer
   }
 }
 
+// Type of the last SDK message, for receipts: shows where a step that went silent was waiting. Never content.
+export function eventLabel(message: Record<string, unknown>) {
+  const event = message.type === 'stream_event' ? (message.event as {type?: unknown} | undefined)?.type : undefined;
+  const label = typeof event === 'string' ? `stream_event.${event}` : String(message.type ?? 'unknown');
+  return /^[a-z0-9_.]{1,64}$/.test(label) ? label : 'unknown';
+}
+
 const RETRYABLE_DECISIONS = new Set(['invalid_decision', 'invalid_arguments', 'unknown_tool', 'tool_choice', 'parallel_calls', 'empty_decision', 'native_tool_call']);
 
 // The SDK session has no native tools (tools: []); every Codex tool belongs in the structured decision's calls.
@@ -163,7 +170,8 @@ export function sdkRunner(cwd: string, models: ClaudeModel[], queryImpl: typeof 
     // The accepted model step starts here, before the guard and the account handshake, and is never reset.
     const startedAt = new Date(), startedClock = performance.now();
     const abortController = new AbortController();
-    const abort = () => abortController.abort();
+    // Keep the caller's reason, so a router timeout is recorded as a timeout and not as a user cancel.
+    const abort = () => abortController.abort(signal.reason);
     signal.addEventListener('abort', abort, {once: true});
     if (signal.aborted) abort();
     let session: ReturnType<typeof query> | undefined;
@@ -175,6 +183,7 @@ export function sdkRunner(cwd: string, models: ClaudeModel[], queryImpl: typeof 
     let context: ContextUsage | undefined;
     let result: StepResult | undefined, failure: unknown;
     let attempts = 0, rejected: Record<string, unknown> | undefined;
+    let lastEvent: string | undefined, lastEventClock: number | undefined;
     const closeSession = () => {
       release();
       if (session && !closed) {
@@ -205,6 +214,7 @@ export function sdkRunner(cwd: string, models: ClaudeModel[], queryImpl: typeof 
         const message = next.value as unknown as Record<string, unknown>;
         // Thinking and output arrive as frequent stream events (measured gaps under 2 s at high effort).
         progress();
+        lastEvent = eventLabel(message); lastEventClock = performance.now();
         if (message.type === 'result') {final = message; stage = 'final_received'; break;}
         direct ??= nativeToolCall(message);
         contextTracker.observe(message);
@@ -257,7 +267,10 @@ export function sdkRunner(cwd: string, models: ClaudeModel[], queryImpl: typeof 
     if (runtime.receiptsDir) {
       const endClock = performance.now();
       const aborted = abortController.signal.aborted || (failure instanceof Error && failure.name === 'AbortError');
-      const code = failure === undefined ? 'success' : failure instanceof BridgeError ? failure.code : aborted ? 'aborted' : 'sdk_error';
+      const reason = signal.reason;
+      const timedOut = reason instanceof BridgeError && reason.code === 'timeout';
+      const code = failure === undefined ? 'success' : timedOut ? `timeout_${reason.details.limit ?? 'stall'}`
+        : failure instanceof BridgeError ? failure.code : aborted ? 'aborted' : 'sdk_error';
       // Before the prompt was released nothing was asked of the model, so a refusal is blocked. After it, a final result
       // that is not a verified success is a failure; without a usable final result the outcome stays incomplete.
       const status: ReceiptStatus = failure === undefined ? 'complete' : code === 'aborted' ? 'aborted' : stage === 'not_started' ? 'blocked'
@@ -278,6 +291,8 @@ export function sdkRunner(cwd: string, models: ClaudeModel[], queryImpl: typeof 
         attempts, rejected: rejected ? {code: safeCode(rejected.code), ...(typeof rejected.tool === 'string' ? {tool: rejected.tool.slice(0, 200)} : {}),
           ...(typeof rejected.kind === 'string' ? {kind: rejected.kind.slice(0, 20)} : {})} : null,
         request_kind: isCompactionRequest(request) ? 'compaction' : 'turn',
+        last_event: lastEvent ?? null,
+        last_event_age_ms: lastEventClock === undefined ? null : Math.round(endClock - lastEventClock),
       };
       try {await writeReceipt(runtime.receiptsDir, receipt);}
       catch (evidence) {

@@ -10,7 +10,9 @@ import { VERSION } from './version.js';
 export interface ServerOptions {
   // timeoutMs / compactionTimeoutMs: longest stretch without model activity; maxStepMs: hard cap for any Claude step.
   // concurrency: Claude steps running at once. queueMs: how long an extra Claude step waits for a slot before failing as busy.
+  // heavyTimeoutMs: stall limit for a large request (heavyBytes or more) or xhigh/max effort, where Opus can think for minutes before its first output.
   token: string; run: RunStep; timeoutMs?: number; compactionTimeoutMs?: number; maxStepMs?: number; heartbeatMs?: number; maxBytes?: number; concurrency?: number; queueMs?: number;
+  heavyTimeoutMs?: number; heavyBytes?: number;
   openai?: {models: ReadonlySet<string>; forward: ForwardOpenAI; idleTimeoutMs?: number};
 }
 
@@ -35,8 +37,18 @@ async function body(request: IncomingMessage, maxBytes: number) {
   catch { throw new BridgeError(400, 'invalid_json', 'Request body is not valid JSON.'); }
 }
 
+// A GPT request that failed before OpenAI answered: say so, instead of the generic Claude failure text.
+function upstreamFailure(error: unknown, idle: boolean) {
+  if (idle) return new BridgeError(504, 'openai_idle_timeout', 'OpenAI sent no data for this GPT request within the router idle limit. Retry the step.');
+  const cause = (error as {cause?: {code?: unknown}} | null)?.cause?.code;
+  const code = typeof cause === 'string' && /^[A-Z0-9_]{1,32}$/.test(cause) ? ` (${cause})` : '';
+  return new BridgeError(502, 'openai_upstream_failed', `The router could not reach OpenAI for this GPT request${code}. Retry; if it keeps failing, check the network or run codex login.`);
+}
+
 export function bridgeServer(options: ServerOptions) {
   let active = 0;
+  // Requests in flight, for a restart that lets them finish (drain) instead of cutting them off.
+  let inflight = 0, draining = false, settle = () => {};
   const limit = options.concurrency ?? 6;
   const waiting: (() => void)[] = [];
   // A finished step hands its slot straight to the oldest waiter, so `active` only drops when nobody is queued.
@@ -58,7 +70,10 @@ export function bridgeServer(options: ServerOptions) {
     signal.addEventListener('abort', cancelled, {once: true});
     waiting.push(grant);
   });
-  return createServer(async (req, res) => {
+  const server = createServer(async (req, res) => {
+    inflight++;
+    res.on('close', () => {inflight--; settle();});
+    if (draining) res.setHeader('connection', 'close');
     let timer: ReturnType<typeof setTimeout> | undefined;
     let heartbeat: ReturnType<typeof setInterval> | undefined;
     let acquired = false;
@@ -142,15 +157,20 @@ export function bridgeServer(options: ServerOptions) {
       acquired = true;
       // A step fails only after a stretch with no model activity, or at the hard cap. A fixed 180 s limit cut off
       // slow but active steps, such as one large patch written over a 460k-token context at high effort.
-      const stallLimit = compaction ? (options.compactionTimeoutMs ?? 300000) : (options.timeoutMs ?? 180000);
+      const heavy = ['xhigh', 'max'].includes(String(request.reasoning?.effort ?? '')) || payload.bytes.length >= (options.heavyBytes ?? 1200000);
+      const stallLimit = compaction ? (options.compactionTimeoutMs ?? 300000) : heavy ? (options.heavyTimeoutMs ?? 300000) : (options.timeoutMs ?? 180000);
       const hardLimit = options.maxStepMs ?? 900000;
       let stall: ReturnType<typeof setTimeout> | undefined;
       const timeout = new Promise<never>((_, reject) => {
-        const fail = (message: string) => {controller.abort(); reject(new BridgeError(504, 'timeout', message));};
+        // The abort reason tells the SDK runner (and its receipt) that this was a timeout, not a user cancel.
+        const fail = (message: string, limit: 'stall' | 'hard') => {
+          const error = new BridgeError(504, 'timeout', message, {limit});
+          controller.abort(error); reject(error);
+        };
         const what = compaction ? 'Claude compaction' : 'Claude step';
-        const arm = () => {clearTimeout(stall); stall = setTimeout(() => fail(`${what} timed out: no model activity for ${Math.round(stallLimit / 1000)} s.`), stallLimit);};
+        const arm = () => {clearTimeout(stall); stall = setTimeout(() => fail(`${what} timed out: no model activity for ${Math.round(stallLimit / 1000)} s.`, 'stall'), stallLimit);};
         progress = arm; arm();
-        timer = setTimeout(() => fail(`${what} timed out after ${Math.round(hardLimit / 60000)} min.`), hardLimit);
+        timer = setTimeout(() => fail(`${what} timed out after ${Math.round(hardLimit / 60000)} min.`, 'hard'), hardLimit);
       });
       // Codex has no model fallback for local compaction, so one retry keeps the user's turn from failing.
       const step = async () => {
@@ -167,7 +187,8 @@ export function bridgeServer(options: ServerOptions) {
       if (request.stream) {for (const value of completionEvents(completed)) event(value); res.end();}
       else res.writeHead(200, {'content-type': 'application/json'}).end(JSON.stringify(completed));
     } catch (error) {
-      const failure = error instanceof BridgeError ? error : new BridgeError(502, 'bridge_failed', 'Claude bridge failed. Run doctor to check the local runtime and login.');
+      const failure = error instanceof BridgeError ? error : forwarding ? upstreamFailure(error, controller.signal.aborted)
+        : new BridgeError(502, 'bridge_failed', 'Claude bridge failed. Run doctor to check the local runtime and login.');
       const details = {code: failure.code, message: failure.message};
       if (!res.destroyed) {
         if (res.headersSent && forwarding) res.destroy();
@@ -176,4 +197,15 @@ export function bridgeServer(options: ServerOptions) {
       }
     } finally {if (acquired) release(); clearTimeout(timer); clearInterval(heartbeat);}
   });
+  // Restart without cutting off work: stop listening at once (the port is free for the next router), close idle
+  // keep-alive sockets, let requests in flight finish, then resolve. maxMs bounds a step that never ends.
+  const drain = (maxMs = 16 * 60000) => new Promise<void>(resolve => {
+    draining = true;
+    server.close();
+    const cap = setTimeout(() => {server.closeAllConnections(); resolve();}, maxMs);
+    cap.unref();
+    settle = () => {server.closeIdleConnections(); if (inflight === 0) {clearTimeout(cap); resolve();}};
+    settle();
+  });
+  return Object.assign(server, {drain});
 }

@@ -52,6 +52,9 @@ export interface Receipt {
   rejected?: {code: string; tool?: string; kind?: string} | null;
   // 'compaction' when Codex asked for a context-checkpoint summary; 'turn' for an ordinary step.
   request_kind?: 'turn' | 'compaction';
+  // Type of the last SDK message and how long before the end it arrived; shows where a silent step was waiting.
+  last_event?: string | null;
+  last_event_age_ms?: number | null;
 }
 
 export class ReceiptError extends BridgeError {

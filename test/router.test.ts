@@ -131,6 +131,53 @@ test('image routes are not offered without the GPT router, and the forwarder tar
   assert.deepEqual(called, ['https://chatgpt.com/backend-api/codex/images/generations', 'https://chatgpt.com/backend-api/codex/images/edits']);
 });
 
+test('drain refuses new connections but lets a Claude step in flight finish', {timeout: 10000}, async t => {
+  let release!: () => void;
+  const hold = new Promise<void>(resolve => {release = resolve;});
+  const server = bridgeServer({token: localToken, run: async () => {await hold; return claudeResult;}});
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  t.after(() => {release(); server.closeAllConnections(); server.close();});
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/responses`;
+  const body = JSON.stringify({model: 'claude-sdk-haiku', input: 'hi', stream: false});
+  const first = fetch(url, {method: 'POST', headers: auth, body});
+  await new Promise(resolve => setTimeout(resolve, 150));
+  let drained = false;
+  const draining = server.drain().then(() => {drained = true;});
+  await assert.rejects(fetch(url, {method: 'POST', headers: auth, body}));
+  assert.equal(drained, false, 'drain waits for the step in flight');
+  release();
+  assert.equal((await first).status, 200);
+  await draining;
+  assert.equal(drained, true);
+});
+
+test('a large or xhigh Claude step gets the longer stall limit; an ordinary one keeps the short one', {timeout: 10000}, async t => {
+  const server = bridgeServer({token: localToken, timeoutMs: 100, heavyTimeoutMs: 600,
+    run: async () => {await new Promise(resolve => setTimeout(resolve, 300)); return claudeResult;}});
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  t.after(() => {server.closeAllConnections(); server.close();});
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/responses`;
+  const send = (effort?: string) => fetch(url, {method: 'POST', headers: auth,
+    body: JSON.stringify({model: 'claude-sdk-haiku', input: 'hi', stream: false, ...(effort ? {reasoning: {effort}} : {})})});
+  const ordinary = await send();
+  assert.equal(ordinary.status, 504);
+  assert.match((await ordinary.json()).error.message, /no model activity for 0 s|no model activity/);
+  assert.equal((await send('xhigh')).status, 200);
+});
+
+test('a GPT request that cannot reach OpenAI reports an OpenAI error, not a Claude one', {timeout: 10000}, async t => {
+  const server = bridgeServer({token: localToken, run: async () => claudeResult,
+    openai: {models: new Set(['gpt-test']), forward: async () => {throw Object.assign(new TypeError('fetch failed'), {cause: {code: 'ECONNRESET'}});}}});
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  t.after(() => {server.closeAllConnections(); server.close();});
+  const response = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/responses`, {method: 'POST', headers: auth, body: '{"model":"gpt-test"}'});
+  assert.equal(response.status, 502);
+  const error = (await response.json()).error;
+  assert.equal(error.code, 'openai_upstream_failed');
+  assert.match(error.message, /OpenAI.*ECONNRESET/);
+  assert.doesNotMatch(error.message, /Claude/);
+});
+
 test('long GPT streams do not use Claude concurrency slots', {timeout: 10000}, async t => {
   let release!: () => void;
   const hold = new Promise<void>(resolve => {release = resolve;});

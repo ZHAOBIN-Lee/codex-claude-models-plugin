@@ -5,7 +5,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { sdkRunner } from '../src/sdk.js';
-import { requestSchema, type RunStep } from '../src/contracts.js';
+import { BridgeError, requestSchema, type RunStep } from '../src/contracts.js';
 import {usageStream} from './sdk-usage-fixtures.js';
 
 // RED tests for the runtime policy and receipt behaviour the SDK runner must gain. The fourth argument below is the
@@ -252,6 +252,22 @@ test('cancelling a running query closes the SDK and records an unfinished receip
   assert.equal(receipt.json.sdk_session_id, null);
   assert.deepEqual(receipt.json.actual_models, []);
   assert.ok(!receipt.text.includes(STREAM_SESSION), 'a session seen only in the init message is not the actual session');
+});
+
+test('a router timeout is recorded as a timeout with the last SDK event, not as a user cancel', {timeout: 20000}, async t => {
+  const f = await fixture(t);
+  const sdk = fakeSdk({final: 'hang'});
+  const controller = new AbortController();
+  const running = run(f, sdk, controller.signal).then(() => 'resolved', () => 'rejected');
+  await sdk.initSeen;
+  await new Promise(resolve => setTimeout(resolve, 50));
+  controller.abort(new BridgeError(504, 'timeout', 'Claude step timed out: no model activity for 300 s.', {limit: 'stall'}));
+  assert.equal(await running, 'rejected');
+  const receipt = await onlyReceipt(f);
+  assert.equal(receipt.json.code, 'timeout_stall');
+  assert.notEqual(receipt.json.status, 'complete');
+  assert.equal(receipt.json.last_event, 'system');
+  assert.ok(Number.isInteger(receipt.json.last_event_age_ms) && receipt.json.last_event_age_ms >= 0);
 });
 
 test('a success result without verifiable model, session or usage is never recorded as complete', {timeout: 40000}, async t => {

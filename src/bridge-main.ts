@@ -19,6 +19,13 @@ async function main() {
     ...(state.openaiModels ? {openai: {models: new Set(state.openaiModels), forward: openaiForwarder()}} : {})});
   server.on('error', error => {console.error(`Bridge listen error: ${(error as NodeJS.ErrnoException).code ?? 'unknown'}`); process.exitCode = 1;});
   server.listen(state.port, '127.0.0.1');
-  for (const signal of ['SIGTERM', 'SIGINT'] as const) process.on(signal, () => {server.closeAllConnections(); server.close(); setTimeout(() => process.exit(0), 500).unref();});
+  // Stopping no longer cuts off chats: new connections are refused at once, steps in flight finish, then the process exits.
+  // A second signal exits immediately.
+  let stopping = false;
+  for (const signal of ['SIGTERM', 'SIGINT'] as const) process.on(signal, () => {
+    if (stopping) process.exit(0);
+    stopping = true;
+    void server.drain().then(() => process.exit(0));
+  });
 }
 main().catch(error => {console.error(error instanceof Error ? error.message : 'Bridge startup failed.'); process.exitCode = 1;});

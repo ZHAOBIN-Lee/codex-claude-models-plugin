@@ -49,7 +49,7 @@ No SDK execution tools are exposed (only the structured-output tool). Every step
 
 macOS arm64, Codex 0.160.1, official Claude Code 2.1.285, Agent SDK 0.3.270.
 
-- 206 tests; typecheck and build pass. Desktop app: after the image-route fix, an image was generated in a Claude chat through the router (before: 404). The native single-chat migration test fails on Codex 0.162.0-alpha.2 only because its version gate refuses untested versions.
+- 210 tests; typecheck and build pass. Desktop app: after the image-route fix, an image was generated in a Claude chat through the router (before: 404). The native single-chat migration test fails on Codex 0.162.0-alpha.2 only because its version gate refuses untested versions.
 - Desktop app: one Claude (Opus) step spawned three `gpt-6.1-sol` sub-agents together; their commands ran at 12:36:19, 12:36:20 and 12:36:20 and all three reported back. With `NPM_BIN` set, the install-runtime tests run too.
 - Desktop app: a Claude parent spawned a GPT sub-agent (`gpt-6.1-sol`) that ran `pwd && date` and reported back, after the plain-text `encrypted_content` fix. The earlier mixed sub-agent check below used headless `codex exec` and did not cover this path.
 - Every Claude model in the catalog had its window read from the final SDK result (1M or 200k). Unverified or suffixed IDs fall back to 200k.
