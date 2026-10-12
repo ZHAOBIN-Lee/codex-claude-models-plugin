@@ -16,7 +16,33 @@ export const ROUTER_TOKEN_HEADER = 'x-codex-router-token';
 export interface OpenAIRequest {path: string; headers: IncomingHttpHeaders; body: Buffer; signal: AbortSignal}
 export type ForwardOpenAI = (request: OpenAIRequest) => Promise<Response>;
 
-export function openaiForwarder(fetchImpl: typeof fetch = fetch): ForwardOpenAI {
+// Network errors raised before OpenAI sent any response. A short network drop (hotspot, Wi-Fi handover)
+// can outlast Codex's own reconnects, so the router retries these a little itself.
+const CONNECT_ERRORS = new Set(['ETIMEDOUT', 'ECONNREFUSED', 'ECONNRESET', 'ENOTFOUND', 'EAI_AGAIN',
+  'ENETUNREACH', 'EHOSTUNREACH', 'ENETDOWN', 'EPIPE', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_SOCKET']);
+export const CONNECT_RETRY_DELAYS_MS: readonly number[] = [1_000, 3_000];
+
+function connectErrorCode(error: unknown): string | undefined {
+  if (!(error instanceof Error) || error.name === 'AbortError') return undefined;
+  let cause: unknown = (error as {cause?: unknown}).cause;
+  for (let depth = 0; cause && depth < 4; depth++) {
+    const code = (cause as {code?: unknown}).code;
+    if (typeof code === 'string' && CONNECT_ERRORS.has(code)) return code;
+    cause = (cause as {cause?: unknown}).cause;
+  }
+  return undefined;
+}
+
+function wait(ms: number, signal: AbortSignal) {
+  return new Promise<void>((resolve, reject) => {
+    if (signal.aborted) { reject(signal.reason); return; }
+    const timer = setTimeout(() => { signal.removeEventListener('abort', onAbort); resolve(); }, ms);
+    const onAbort = () => { clearTimeout(timer); reject(signal.reason); };
+    signal.addEventListener('abort', onAbort, {once: true});
+  });
+}
+
+export function openaiForwarder(fetchImpl: typeof fetch = fetch, retryDelaysMs: readonly number[] = CONNECT_RETRY_DELAYS_MS): ForwardOpenAI {
   return async request => {
     const url = routes[request.path];
     if (!url) throw new BridgeError(404, 'unsupported_route', 'Unsupported OpenAI route.');
@@ -29,8 +55,18 @@ export function openaiForwarder(fetchImpl: typeof fetch = fetch): ForwardOpenAI 
         headers.set(key, Array.isArray(value) ? value.join(',') : value);
       }
     }
-    const response = await fetchImpl(url, {method: 'POST', headers, body: new Uint8Array(request.body),
-      signal: request.signal, redirect: 'manual'});
+    let response: Response;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        response = await fetchImpl(url, {method: 'POST', headers, body: new Uint8Array(request.body),
+          signal: request.signal, redirect: 'manual'});
+        break;
+      } catch (error) {
+        const delay = retryDelaysMs[attempt];
+        if (delay === undefined || request.signal.aborted || !connectErrorCode(error)) throw error;
+        try { await wait(delay, request.signal); } catch { throw error; }
+      }
+    }
     if (response.status >= 300 && response.status < 400) {
       await response.body?.cancel();
       throw new BridgeError(502, 'upstream_redirect', 'OpenAI returned a redirect; the router will not forward credentials to another destination.');
