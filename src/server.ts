@@ -16,6 +16,10 @@ export interface ServerOptions {
   openai?: {models: ReadonlySet<string>; forward: ForwardOpenAI; idleTimeoutMs?: number};
 }
 
+// Codex keeps inline images in the history as base64, so an image-heavy chat can pass 64 MB long before it nears
+// the token compaction threshold. Claude steps drop old images later (see history media limits); GPT steps forward as-is.
+export const DEFAULT_MAX_BODY_BYTES = 256 * 1024 * 1024;
+
 async function rawBody(request: IncomingMessage, maxBytes: number) {
   if (Number(request.headers['content-length'] ?? 0) > maxBytes) {
     request.resume();
@@ -121,11 +125,11 @@ export function bridgeServer(options: ServerOptions) {
       };
       if (imageRoute) {
         if (!options.openai) throw new BridgeError(404, 'not_found', 'Image generation needs the GPT router.');
-        await proxy(await rawBody(req, options.maxBytes ?? 64 * 1024 * 1024));
+        await proxy(await rawBody(req, options.maxBytes ?? DEFAULT_MAX_BODY_BYTES));
         return;
       }
       // Inline screenshots make long Codex histories large; GPT steps are forwarded as-is and must not be capped below a direct request.
-      const payload = await body(req, options.maxBytes ?? 64 * 1024 * 1024);
+      const payload = await body(req, options.maxBytes ?? DEFAULT_MAX_BODY_BYTES);
       const model = payload.json && typeof payload.json === 'object' && 'model' in payload.json ? payload.json.model : undefined;
       if (typeof model !== 'string') throw new BridgeError(400, 'invalid_request', 'A model is required.');
       if (options.openai?.models.has(model)) {
