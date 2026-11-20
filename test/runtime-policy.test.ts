@@ -156,8 +156,9 @@ test('an active or default Anthropic profile is refused without reading it', asy
 });
 
 test('subscription labels are normalised only from exact known names', () => {
-  for (const [label, plan] of [['pro', 'pro'], ['Pro', 'pro'], ['Claude Pro', 'pro'], ['max', 'max'], ['Claude Max', 'max']] as const) {
+  for (const [label, plan] of [['pro', 'pro'], ['Pro', 'pro'], ['Claude Pro', 'pro'], ['max', 'max'], ['Claude Max', 'max'],
+    ['ultra', 'ultra'], ['Claude Ultra', 'ultra'], [' CLAUDE ULTRA ', 'ultra']] as const) {
     assert.equal(normalizeSubscription(label), plan, label);
   }
-  for (const label of ['team', 'enterprise', 'free', 'max_20x', 'professional', '', undefined, null, 5]) assert.equal(normalizeSubscription(label), null, String(label));
+  for (const label of ['team', 'enterprise', 'free', 'max_20x', 'ultra_20x', 'ultra trial', 'professional', 'constructor', '__proto__', '', undefined, null, 5]) assert.equal(normalizeSubscription(label), null, String(label));
 });

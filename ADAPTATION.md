@@ -15,7 +15,9 @@ Codex runs the tool calls under its own sandbox and approvals, shows them, and s
 
 Claude's decision goes straight to Codex, which executes and displays the real tool calls. It is not a token stream: each decision is buffered until it is complete, and Claude's hidden thinking and internal steps are not shown.
 
-No SDK execution tools are exposed (only the structured-output tool). Every step is a fresh SDK query, so continuity comes from Codex's chat history, not from an SDK resume. The SDK session ID of a step is not the Codex thread ID.
+No SDK execution tools are exposed (only the structured-output tool). Every subscription step is a fresh SDK query, so continuity comes from Codex's chat history, not from an SDK resume. The SDK session ID of a step is not the Codex thread ID.
+
+The optional [API fallback](API-FALLBACK.md) branches from a definitive subscription quota failure to the official Anthropic API. It reuses the prepared history and decision validation, with separate private accounting and receipts. It is disabled until explicitly configured and never creates an SDK session ID for an API response.
 
 ## What was fixed
 
@@ -27,7 +29,7 @@ No SDK execution tools are exposed (only the structured-output tool). Every step
 - If a runtime directory swap fails but did apply, the original install is restored from the saved copy. A directory is only removed if this install put it there.
 - Edits you make later are preserved. If a setting this tool owns was changed by you to some third value, every operation reports the conflict and refuses to overwrite it until you restore the value.
 
-**The runtime guard runs before every Claude step, and receipts are complete.**
+**The runtime guard runs before every subscription step, and receipts are complete.**
 
 - Order: raw environment (route and credential variables, names only) → private policy file (mode 600, no symlink, strict schema) → scan of local settings → pinned CLI (SHA-256 first, then version, then `auth status` as `claude.ai` Pro or Max) → SDK account check (first-party, Pro or Max). Settings are scanned before the CLI because a helper in a settings file can run when the CLI starts, even for `--version`.
 - The scan covers Claude settings in your home, project files up the directory tree, managed settings files and drop-ins, a local macOS managed-preference file, and an Anthropic profile. It refuses symlinks and unverifiable files. Its coverage is recorded as `local_file_scan`. It does not check remote, MDM or Windows policy. Also, `settingSources: []` does not turn off managed settings: those still load in SDK sessions.
@@ -42,6 +44,8 @@ No SDK execution tools are exposed (only the structured-output tool). Every step
 **Concurrency and queueing.** The router allows 6 Claude steps at once (`concurrency`). GPT requests no longer take a slot: after the batch migration every GPT chat and sub-agent went through the router, long GPT streams filled all 6 slots, and the router itself answered `429 busy` to GPT and Claude alike (Codex does not retry, `request_max_retries = 0`). A Claude step over the limit now waits in FIFO order for up to `queueMs` (default 120 s); a streamed request has already received its 200 header and heartbeats, so a timeout arrives as a `response.failed` event with code `busy`.
 
 **Direct native tool calls.** The SDK session runs with `tools: []`, so the only way to use a Codex tool is the structured decision's `calls`. Opus and Sonnet both occasionally called `exec_command`, `apply_patch` or `tool_search` directly. The SDK answered "No such tool available", the permission-denial list stayed empty, and the model then returned a valid decision claiming Codex tools were unavailable. `nativeToolCall` in `src/sdk.ts` watches the main model's stream (sub-agent frames and `StructuredOutput` are ignored). The first version aborted the attempt at any direct call; in real use most such steps had already recovered by returning the call in `calls`, so aborting doubled latency, its "nothing was executed" note made Sonnet re-run a command eight times, and a step rejected twice failed the turn. Now the answer is kept when it contains calls. Only a first-attempt answer with no calls after a direct call is retried once (code `native_tool_call`), with a note that earlier tool results are real; the retry is never rejected for this reason. The receipt records `rejected: {code: "native_tool_call", tool}`.
+
+**Additional tool declarations in history.** Codex 0.163.0-alpha.10.2 adds `additional_tools` developer records when a GPT model runs in code mode (`tool_mode: code_mode_only`), for example declaring `functions.exec`. The records stay in the chat history after switching to Claude, and previously made every Claude step fail with `Unsupported history item: additional_tools`. Both Claude routes now accept these records as readable history, keeping function parameters and custom grammars, in chronological blocks so the cached system prompt is unchanged. They are context only: Claude models are not in code mode, Codex does not register those tools on a Claude step, and a call to one fails with `unsupported custom tool call`. Callable tools therefore remain the current `request.tools` plus `tool_search` results. Duplicate keys within one declaration and malformed declaration containers return 400; unknown history types still fail explicitly. Existing chats need no migration. GPT requests continue to pass through.
 
 ## What has and hasn't been verified
 
@@ -149,7 +153,7 @@ node "$SETUP_MJS" uninstall --codex-home "$TARGET_HOME"
 - `deactivate` restores the previous provider, catalog and default, and removes the owned hook and its trust. `uninstall` also removes the unchanged generated providers, catalogs and agent files.
 - If you edited a field the tool owns, it refuses, leaves the files and backups as they are, and says which one. Put the value back (or decide it is yours) and run it again. Don't force the whole old config back over your later edits, and don't delete `~/.codex` or kill other services; `stop` only stops this tool's own bridge.
 - Keep the backups. The runtime, the private policy and the receipts stay after `uninstall` on purpose; remove them yourself, if you want, once you no longer need them as evidence.
-- There is no automatic API fallback anywhere in this.
+- API fallback is disabled by default. If you explicitly enabled it, run `node "$SETUP_MJS" api-disable --codex-home "$TARGET_HOME"` to turn it off. Private API credentials and accounting remain on disk; disabling or reinstalling does not erase pending costs. See [API fallback](API-FALLBACK.md).
 
 ## When something stops
 

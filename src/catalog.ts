@@ -21,7 +21,7 @@ export function discoverCatalog(models: ModelInfo[]): ClaudeModel[] {
 // another model's capacity. Unverified resolutions retain the adapter fallback.
 // Opus, Fable and the 4.x models were read from the same field on 2026-10-06 with one tiny request each.
 const verifiedContextWindows: ReadonlyMap<string, number> = new Map([
-  ...['claude-sonnet-5-5', 'claude-opus-5-5', 'claude-fable-5-1', 'claude-sonnet-5', 'claude-opus-5', 'claude-fable-5',
+  ...['claude-fable-5-2', 'claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-opus-5-5', 'claude-fable-5-1', 'claude-sonnet-5', 'claude-opus-5', 'claude-fable-5',
     'claude-opus-4-8', 'claude-opus-4-7'].map(id => [id, 1000000] as const),
   ...['claude-haiku-4-5-20251001', 'claude-opus-4-6', 'claude-sonnet-4-6'].map(id => [id, 200000] as const),
 ]);

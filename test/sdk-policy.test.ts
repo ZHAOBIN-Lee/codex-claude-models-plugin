@@ -157,6 +157,8 @@ test('a missing, unpinned or unconfirmed runtime is blocked before any SDK query
     ['extra usage is not recorded as disabled', {policy: {subscription_usage_credits_disabled: false}}],
     ['extra usage has no user confirmation', {policy: {usage_credits_confirmation: undefined}}],
     ['CLI reports an API-key login', {auth: {loggedIn: true, authMethod: 'api_key'}}],
+    ['Ultra still requires subscription login', {auth: {loggedIn: true, authMethod: 'api_key', subscriptionType: 'ultra'}}],
+    ['CLI reports a prototype property as a plan', {auth: {loggedIn: true, authMethod: 'claude.ai', subscriptionType: 'constructor'}}],
     ['CLI reports it is logged out', {auth: {loggedIn: false}}],
   ];
   for (const [name, options] of cases) {
@@ -173,6 +175,15 @@ test('a route override in the environment is rejected before the SDK is created 
   const sdk = fakeSdk({final: finalMessage()});
   await assertBlocked(f, sdk);
   assert.equal(process.env.ANTHROPIC_BASE_URL, override, 'the check must not silently clean the variable');
+});
+
+test('an Ultra CLI subscription passes the pinned runtime guard', async t => {
+  for (const subscriptionType of ['ultra', 'Claude Ultra']) await t.test(subscriptionType, async st => {
+    const f = await fixture(st, {auth: {loggedIn: true, authMethod: 'claude.ai', subscriptionType, email: AUTH_SECRET}});
+    const sdk = fakeSdk({final: finalMessage()});
+    assert.equal((await run(f, sdk)).decision.text, 'fixture answer');
+    assert.equal((await onlyReceipt(f)).json.status, 'complete');
+  });
 });
 
 test('a successful run uses the pinned executable and explicit medium effort and stores a private receipt', {timeout: 20000}, async t => {

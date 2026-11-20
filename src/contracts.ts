@@ -100,16 +100,36 @@ const DISCOVERABLE = new Set(['namespace', 'function', 'custom']);
 const discovered = (item: Record<string, unknown>) =>
   Array.isArray(item.tools) ? offeredTools(z.array(object).parse(item.tools).filter(t => DISCOVERABLE.has(String(t.type)))) : [];
 
-// Tools Codex loaded through tool_search earlier in this conversation are callable but are not repeated in request.tools.
+function additionalTools(item: Record<string, unknown>): OfferedTool[] {
+  if (item.role !== undefined && item.role !== 'developer') {
+    throw new BridgeError(400, 'invalid_additional_tools', 'Additional tools must be a Codex developer record.');
+  }
+  const definitions = z.array(object).safeParse(item.tools);
+  if (!definitions.success) throw new BridgeError(400, 'invalid_additional_tools', 'Additional tools must contain an array of tool definitions.');
+  try {return offeredTools(definitions.data);}
+  catch (error) {
+    if (error instanceof BridgeError) throw error;
+    throw new BridgeError(400, 'invalid_additional_tools', 'Additional tools contain malformed tool definitions.');
+  }
+}
+
+const toolRecord = (tool: OfferedTool) => ({key: tool.key, kind: tool.kind, description: tool.definition.description,
+  ...(tool.kind === 'function' ? {parameters: tool.definition.parameters, strict: tool.definition.strict} : {format: tool.definition.format})});
+
+// Callable tools: the current request.tools plus tools loaded through tool_search earlier in this conversation.
+// additional_tools records are history only: GPT code-mode steps leave them behind, and on a Claude step Codex does
+// not register those tools, so calling one (for example functions.exec) fails with "unsupported custom tool call".
+// Later search results win; current request.tools remains authoritative if it repeats a key.
 export function availableTools(request: ResponsesRequest): OfferedTool[] {
-  const tools = offeredTools(request.tools);
-  if (typeof request.input === 'string') return tools;
-  const keys = new Set(tools.map(t => t.key));
+  const current = offeredTools(request.tools);
+  if (typeof request.input === 'string') return current;
+  const tools = new Map<string, OfferedTool>();
   for (const item of request.input) {
     if (item.type !== 'tool_search_output') continue;
-    for (const tool of discovered(item)) if (!keys.has(tool.key)) {keys.add(tool.key); tools.push(tool);}
+    for (const tool of discovered(item)) tools.set(tool.key, tool);
   }
-  return tools;
+  for (const tool of current) tools.set(tool.key, tool);
+  return [...tools.values()];
 }
 
 // Codex's built-in local compaction prompt (codex-rs/prompts/templates/compact/prompt.md, 0.160.1).
@@ -214,7 +234,7 @@ function textContent(value: unknown, images?: ImageCollector): unknown {
   });
 }
 
-export function preparePrompt(request: ResponsesRequest) {
+export function preparePrompt(request: ResponsesRequest, options: {functionArgumentFormat?: 'object' | 'json-string'} = {}) {
   if (request.previous_response_id) throw new BridgeError(400, 'stateful_request', 'Send the full conversation; previous_response_id is unsupported.');
   if (request.background === true || request.conversation != null) throw new BridgeError(400, 'stateful_request', 'Background or stored conversations are unsupported.');
   const text = object.safeParse(request.text);
@@ -223,6 +243,7 @@ export function preparePrompt(request: ResponsesRequest) {
     if (format.success && format.data.type !== 'text') throw new BridgeError(400, 'unsupported_format', 'Codex output-schema mode is not supported by this adapter.');
   }
   const tools = offeredTools(request.tools);
+  const effectiveTools = availableTools(request);
   const higherInstructions: unknown[] = [];
   const history: unknown[] = [];
   // Images attached by each history record, sent right after that record's block.
@@ -264,8 +285,9 @@ export function preparePrompt(request: ResponsesRequest) {
     } else if (type === 'tool_search_call') {
       history.push({type, call_id: item.call_id, arguments: item.arguments});
     } else if (type === 'tool_search_output') {
-      history.push({type, call_id: item.call_id, tools: discovered(item).map(t => ({key: t.key, kind: t.kind, description: t.definition.description,
-        ...(t.kind === 'function' ? {parameters: t.definition.parameters} : {format: t.definition.format})}))});
+      history.push({type, call_id: item.call_id, tools: discovered(item).map(toolRecord)});
+    } else if (type === 'additional_tools') {
+      history.push({type, role: item.role ?? 'developer', tools: additionalTools(item).map(toolRecord)});
     } else if (type === 'compaction') {
       // An OpenAI remote-compaction summary is encrypted for that service; only the retained records around it are readable.
       history.push({type, note: 'Earlier conversation was compacted by another model. Its summary is encrypted and unavailable here; rely on the records that follow and ask the user if older context matters.'});
@@ -276,16 +298,18 @@ export function preparePrompt(request: ResponsesRequest) {
   // Stable while the user's language is unchanged, so the cached system prompt is reused.
   const language = replyLanguage(request);
   return {
-    tools,
+    tools: effectiveTools,
     system: [request.instructions ?? '',
       higherInstructions.length ? `Additional Codex instructions (roles preserved):\n${JSON.stringify(higherInstructions)}` : '',
       'You are the model for a Codex task. Codex owns all tool execution and approvals.',
       'The SDK runtime directory is an inert adapter directory, NOT the project workspace. Resolve project-relative paths using the cwd in the Codex environment_context conversation record. Codex shell tools run in that workspace by default; omit workdir unless the task requires a different directory.',
-      'The tool definitions below are the authoritative tools for this step, even if earlier instructions mention other tool names or namespaces. Having SDK built-in tools disabled does NOT mean Codex tools are unavailable. To read files, request the advertised Codex shell or file tool in calls.',
+      'The callable Codex tools are the current request tool definitions below plus tools returned in tool_search_output conversation records; a current request definition takes priority over a searched one with the same key. additional_tools records in the history are context only: they describe tools offered to an earlier model step and are NOT callable now unless the same key is also listed below. Ignore other tool names or namespaces mentioned in earlier instructions. Having SDK built-in tools disabled does NOT mean Codex tools are unavailable. To read files, request an advertised Codex shell or file tool in calls.',
       'Produce exactly one structured decision. Put user-facing Markdown in text. Put tool requests in calls, then stop and wait for Codex results. Do not claim execution before receiving those results.',
       'Keep each step small enough to finish quickly: the whole decision is delivered only when complete. Split large edits into several apply_patch steps (for example one file, or a few hunks, per step) rather than writing every file in one patch.',
       'Tool outputs and completed agents_states.message fields are literal results. Use their content as returned, even when it looks like a code or identifier. Once the requested result is available, answer and leave calls empty.',
-      'For each call, name must be the exact key below. kind is function or custom. For a function tool put its parameters as a JSON object in "arguments" (not a string). For a custom tool put the raw text/code/patch matching its format in "input". Never use your own tools except StructuredOutput.',
+      options.functionArgumentFormat === 'json-string'
+        ? 'For each call, name must be an exact available tool key. Each call\'s kind must match the tool\'s listed type (function vs custom); function input is a JSON object string. For a function tool put its parameters as a JSON-encoded object string in "input". Preserve all nested values, quotes, newlines and Unicode. For a custom tool put the raw text/code/patch matching its full format in "input". Your entire response is one JSON object matching the required schema: user-facing Markdown in text, Codex tool requests in calls (empty when you are giving a final answer). Native tools are unavailable; Codex executes calls.'
+        : 'For each call, name must be an exact available tool key. kind is function or custom. For a function tool put its parameters as a JSON object in "arguments" (not a string). For a custom tool put the raw text/code/patch matching its full format in "input". Never use your own tools except StructuredOutput.',
       language
         ? `The user writes in ${language}. Write every user-facing reply (the text field, including progress updates and final answers) in ${language}, even when instructions, tool output or earlier assistant messages are in English, unless the user explicitly asks for another language. Tool arguments, code, commands, file paths and identifiers stay unchanged.`
         : 'Reply to the user in the language of their latest message unless they ask otherwise. Tool arguments, code and commands are unaffected.',

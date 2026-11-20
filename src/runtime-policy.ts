@@ -254,11 +254,14 @@ async function runCli(claudePath: string, args: string[], options: {signal?: Abo
   }
 }
 
-export type SubscriptionPlan = 'pro' | 'max';
+export type SubscriptionPlan = 'pro' | 'max' | 'ultra';
 // Only exact, known labels; anything else is unsupported rather than guessed.
 export function normalizeSubscription(label: unknown): SubscriptionPlan | null {
-  const known: Record<string, SubscriptionPlan> = {pro: 'pro', 'claude pro': 'pro', max: 'max', 'claude max': 'max'};
-  return typeof label === 'string' ? known[label.trim().toLowerCase()] ?? null : null;
+  const known: Record<string, SubscriptionPlan> = {
+    pro: 'pro', 'claude pro': 'pro', max: 'max', 'claude max': 'max', ultra: 'ultra', 'claude ultra': 'ultra',
+  };
+  const key = typeof label === 'string' ? label.trim().toLowerCase() : '';
+  return Object.hasOwn(known, key) ? known[key]! : null;
 }
 
 export async function verifyPinnedCli(policy: RuntimePolicy, options: {signal?: AbortSignal; cwd: string; env: NodeJS.ProcessEnv}) {
@@ -281,8 +284,9 @@ export async function verifyPinnedCli(policy: RuntimePolicy, options: {signal?: 
   const status = typeof auth === 'object' && auth !== null ? auth as Record<string, unknown> : {};
   if (status.loggedIn !== true) throw blocked('The pinned Claude CLI is not logged in. Run claude auth login.');
   if (status.authMethod !== 'claude.ai') throw blocked('The pinned Claude CLI must be logged in with a claude.ai subscription, not another method.');
-  if (status.subscriptionType !== 'pro' && status.subscriptionType !== 'max') throw blocked('The pinned Claude CLI login must be a Pro or Max subscription.');
-  return {version, plan: status.subscriptionType as SubscriptionPlan};
+  const plan = normalizeSubscription(status.subscriptionType);
+  if (!plan) throw blocked('The pinned Claude CLI login must be a Pro, Max or Ultra subscription.');
+  return {version, plan};
 }
 
 export interface VerifiedRuntime {claudePath?: string; claudeVersion?: string; coverage: string}

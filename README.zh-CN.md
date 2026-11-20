@@ -19,7 +19,7 @@
 - **Claude 派 GPT 子代理。** 桌面 App 用的是 Codex 的 v2 子代理协议，任务内容放在 `encrypted_content` 字段里。Claude 当主模型时这里是明文，OpenAI 会拒绝 GPT 子代理的第一个请求，报 “Encrypted function output content could not be decrypted or decoded”。现在 router 转发前会把这类明文字段改成普通文本；真正的 OpenAI 密文（`gAAAAA…`）和其他 GPT 请求都原样转发。
 - **并发。** 只有 Claude 步骤计入 6 个的上限，因为每一步都要启动一个 Claude Code 进程。GPT 请求只做转发，router 不限制它们；以前把它们也算进去，所有聊天都走 router 后就出现了本地的 `429 Too Many Requests`。超出上限的 Claude 步骤会排队（流式请求排队时持续收到心跳），等满 2 分钟仍没有空位才报 `busy`。
 - **直接调用工具。** Claude SDK 会话里没有原生工具，Codex 工具要写进回复的 `calls`。Claude 偶尔仍会直接调用 `exec_command`、`apply_patch`，收到 “No such tool available”。多数时候它在同一步里自己改正，把调用写进 `calls`，这样的回复直接保留。如果它交回的回复没有任何 `calls`（比如说“工具坏了”），router 会带一句提示把这一步重试一次，提示写明工具名，并说明对话里已有的工具结果都是真实执行过的。
-- **安全边界。** Claude 只通过固定的官方 CLI 运行（路径、版本和 SHA-256 都核对），要求订阅登录，没有 API 回退。每次调用都写一份私有凭证，记录实际模型和会话。
+- **安全边界。** 订阅路径使用固定的官方 CLI（核对路径、版本和 SHA-256）及订阅登录。API 回退默认关闭；可选的官方 API 路径需要独立的私有凭据和明确预算。每次调用写私有回执，API 调用不会伪造 SDK 会话。
 - **并行子代理。** 本步提供 `spawn_agent` 时，系统提示会要求 Claude 把互不依赖的子代理一起派出：在同一次回复里放多个 `spawn_agent`，数量不超过空闲的并发名额，再一起等待。会改文件的子代理只有在改动文件不重叠时才并行。改之前，维护者聊天里的 Claude 每一步都只派一个子代理。
 - **生图。** Codex 会把 `/v1/images/generations` 和 `/v1/images/edits` 发给当前 provider。全部聊天迁移到 router 后，这两条请求返回 404，因为 router 只转发 `/v1/responses`。现在它们会用你自己的 Codex 登录原样转发（包括 multipart 格式的编辑请求）到对应的 ChatGPT 后端地址，不检查模型目录。
 - **重启与超时。** 停止 router 时会先排空：立刻拒绝新连接，等正在进行的 Claude 和 GPT 请求跑完（最多 16 分钟）再退出；再发一次停止信号会立即退出。强度为 xhigh/max 或请求较大（约 1.2 MB 以上）的 Claude 步骤，空闲上限从 180 秒放宽到 300 秒。调用凭证会把 router 超时记为 `timeout_stall`/`timeout_hard`（不再记成用户取消），并记录 `last_event` 和 `last_event_age_ms`。GPT 请求连不上 OpenAI 时，报错改为 `openai_upstream_failed` 或 `openai_idle_timeout`，不再显示“Claude bridge failed”。
@@ -52,7 +52,7 @@
 
 - Node.js 22+（我们用的是 24.19.0）和 npm。
 - 你实际使用的 Codex CLI，用绝对路径。
-- 官方 Claude CLI，以及你自己的 claude.ai Pro 或 Max 登录。不支持 API 密钥和 Console 路线。
+- 官方 Claude CLI，以及你自己的 claude.ai Pro、Max 或 Ultra 登录。订阅路径要求这种登录；可选 API 回退使用单独的凭据文件，见 [API 回退说明](API-FALLBACK.zh-CN.md)。
 - macOS。目前只在 macOS 上验收过；Linux 和 Windows 没验过，哪怕配置文字看起来是通用的。
 
 ## 构建并在隔离目录里试用
@@ -108,15 +108,29 @@ CODEX_BIN="$REAL_CODEX" ./node_modules/.bin/tsx scripts/native-acceptance.ts --l
 2. 重启一次 Codex，开新聊天。旧聊天保留原来的 provider，在里面选 Claude 会报 “not supported when using Codex with a ChatGPT account”。迁移方法见 [MIGRATION.zh-CN.md](MIGRATION.zh-CN.md)。
 3. 你原来的 GPT 默认模型保持不变。`deactivate` 和 `uninstall` 会撤销它自己加的改动。
 
+## 更新已有安装
+
+已经装过的用户，按下面三步更新：
+
+1. 在仓库目录拉取最新代码：`git pull`。打包好的 `bin/bridge.mjs` 和 `bin/setup.mjs` 已随仓库提交，不需要自己构建。
+2. 先结束正在运行的 Claude 或 GPT 回复，再执行 `node plugins/codex-claude-models/bin/setup.mjs install`。它会停止 router、替换运行时，然后重新启动。如果 `PATH` 里没有 npm，先设置好 `NPM_BIN`。
+3. 完全退出并重新打开 Codex，让模型菜单重新加载。
+
+重装会重新读取 Codex 缓存的 OpenAI 模型列表，所以 OpenAI 新推出的 GPT 模型会一起加入模型菜单。Claude 登录、router 令牌，以及 API 回退的凭据、预算和账本都会原样保留；回退原来关闭的，更新后仍然关闭。
+
 ## 使用时要知道
 
 - Claude 的决策要等完整返回才显示。Codex 执行工具时会显示 Codex 自己的事件，看不到 Claude 的隐藏思考，也看不到它内部的每一步。
 - 支持文字和当前回合的图片，更早的图片会变成占位说明。音频、Codex 输出 schema 模式和服务端保存的响应 ID 会明确报错。
-- 每一步都是新的 SDK 查询，连续性来自 Codex 的聊天历史。某一步的 SDK 会话 ID 不是 Codex 的线程 ID。
+- 每一步订阅调用都是新的 SDK 查询，连续性来自 Codex 的聊天历史。某一步的 SDK 会话 ID 不是 Codex 的线程 ID。API 回退复用同一份已准备历史，没有 SDK 会话 ID。
 - 某一步 SDK 最终用量里可能同时出现所选模型和 Haiku。我们没查清 CLI 为什么会用 Haiku，也不承诺没有额外用量。
-- 只在上面列出的情况下重试，没有 API 回退。取消和拒绝会分开记录。
-- 如果发现 API 密钥或路线覆盖项，守卫会拒绝运行并说明是哪个变量或文件：`ANTHROPIC_*`、OpenAI 的密钥或地址变量、Claude 设置文件里的辅助程序设置，或 Anthropic 配置档。
-- 每次推理尝试都会在 `<home>/claude-models/receipts` 写一份私有凭证（权限 600）。模型名和会话 ID 只取自最终结果，不取别名，也不取模型自己的说法。
+- 订阅路径只在上面列出的情况下重试。可选付费回退要求明确的结构化订阅额度终态失败，API 调用不会自动重试。取消和拒绝会分开记录。
+- 如果发现 API 密钥或路线覆盖项，订阅守卫会拒绝运行并说明是哪个变量或文件：`ANTHROPIC_*`、OpenAI 的密钥或地址变量、Claude 设置文件里的辅助程序设置，或 Anthropic 配置档。独立的 API 回退凭据不会改变订阅环境。
+- 订阅尝试在 `<home>/claude-models/receipts` 写私有回执；API 尝试写入 `<home>/claude-models/api/receipts`（权限 600）。实际模型和提供方标识取自返回元数据，不取别名，也不取模型自己的说法。
+
+## 可选 API 回退
+
+安装后付费回退保持关闭。[API 教程](API-FALLBACK.zh-CN.md)说明隐藏输入凭据、明确每日与单次预算、可选累计上限、五分钟缓存和再次关闭的方法。`api-status` 与 `doctor` 只报告配置状态，不做付费推理；`configured_unverified` 不代表 API 可用、账单已核验或真实付费调用已通过。
 
 ## 账户条款
 

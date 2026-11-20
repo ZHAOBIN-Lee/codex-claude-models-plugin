@@ -1,0 +1,19 @@
+# Claude subscription-first API fallback
+
+User approved the design and delegated implementation/testing on 2026-10-18. The first real API test has a cumulative US$1 budget. Credential entry is local, hidden, and stored outside the repository. Recurring paid fallback stays disabled until a daily budget is explicitly configured; installing the feature is not enabling it.
+
+## Behavior
+- Default API prompt caching uses the official five-minute automatic cache. Preserve the exact prefix, images and tools; do not prewarm or send background keepalive requests. Reserve cold writes at 1.25 times base input cost and distinguish normal input, cache writes and cache reads in receipts. Context size includes all three input counters; caching never reduces the context seen by Codex.
+- Preserve the current subscription provider, model catalog/window, GPT/image routes, tools, and language behavior.
+- Fallback only after a subscription attempt definitively fails with structured quota evidence. Warnings, runtime guards, login failures, cancellations, malformed decisions, network errors and local queue failures do not trigger paid fallback.
+- Persist quota windows by opaque account identity and scope, with UTC reset timestamps. Probe subscription once at the next real request after reset; missing reset uses bounded cooldown. Ignore stale account events. If account identity cannot be verified, do not reuse persisted quota state.
+- Keep API credentials separate from subscription environment/login. Official Anthropic HTTPS endpoints only, no arbitrary credential-bearing redirects. Private configuration supports an optional workspace ID.
+- API adapter reuses prepared text/image blocks and the existing Codex decision validation. A single synthetic decision tool can carry the decision without granting API-side tool execution. Only complete and locally validated responses are committed. Never fabricate SDK session IDs for API calls.
+- Discover exact API model capability, count prepared input tokens, reserve output space and check final UTF-8 request bytes below 32 MB before inference. No automatic history truncation, model downgrade, global window reduction, recursive compaction or background paid probes.
+- Serialize paid budget reservations in a durable private ledger. Reserve input plus maximum output at verified rates before sending. Include every attempt, parent/child request and compaction. Unknown post-send outcomes retain reservation. Installation, midnight and key rotation must not erase unknown liabilities or the cumulative test budget.
+- One paid attempt per logical step; no API SDK retries. Preserve budget/deadline/cancellation across fallback. Paid errors must never enter the existing generic compaction retry. Client reconnect identity must be validated before claiming exactly-once delivery. Ambiguous retries fail closed rather than blindly regenerate.
+- API failure must not prevent subscription-only use. Disabling fallback works even with damaged API configuration/state. Health/doctor/install make no paid inference. API origin, model, request/message identity, cost estimate and switching reason are recorded in private receipts, never mixed into model/tool output.
+- Existing subscription extra-usage-off policy stays in force. A stored user confirmation is not a live billing check.
+
+## Verification
+Offline: quota-only trigger, warning/success handling, missing/multiple reset windows, account switch, concurrent reservations/probes, restart, cancelled/unknown costs, API HTTP/stream errors, metadata redaction, images/freeform/deferred tools, context/body limits and compaction non-retry. Real: small text and tool decisions, forced quota event into the real API runner, no synthetic event claimed as a real exhausted subscription. Install through idle/drain with backup and verify runtime hash and health. Real native UI notification and actual quota-reset recovery remain separate acceptance checks.

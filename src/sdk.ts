@@ -5,6 +5,13 @@ import { VERSION } from './version.js';
 import { cancelled, GUARD_COVERAGE, normalizeSubscription, pinnedEnvironment, verifyRuntime, type VerifiedRuntime } from './runtime-policy.js';
 import { newRunId, safeCode, summarizeFinal, writeReceipt, type InferenceStage, type Receipt, type ReceiptStatus } from './receipts.js';
 import {ContextUsageTracker, type ContextUsage} from './context-usage.js';
+import {accountFingerprint, SubscriptionLimitTracker} from './subscription-limits.js';
+
+// Only the exact successful SDK result retains handshake evidence; serialization cannot copy or forge it.
+const subscriptionResultAccounts = new WeakMap<StepResult, string>();
+export function subscriptionResultAccount(result: StepResult): string | null {
+  return subscriptionResultAccounts.get(result) ?? null;
+}
 
 export function subscriptionEnvironment(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const result = {...source};
@@ -74,7 +81,8 @@ const subscriptionPlan = (account: {apiProvider?: string; subscriptionType?: str
   account.apiProvider === 'firstParty' ? normalizeSubscription(account.subscriptionType) : null;
 function requireSubscription(account: {apiProvider?: string; subscriptionType?: string}) {
   const plan = subscriptionPlan(account);
-  if (!plan) throw new BridgeError(401, 'subscription_required', 'A Claude subscription login is required. Run claude auth login. API-key fallback is disabled.');
+  if (!plan) throw new BridgeError(401, 'subscription_required',
+    'Claude SDK did not report a supported claude.ai subscription login (Pro, Max or Ultra). Check your Claude login and subscription plan. Authentication failures do not trigger API fallback.');
   return plan;
 }
 
@@ -104,6 +112,31 @@ export async function inspectSdk(cwd: string, runtime: RuntimeOptions = {}, quer
       closed = true;
       try {session.close();} catch {/* closing is best effort */}
     }
+  }
+}
+
+// Account-only handshake for quota routing. Its empty gated prompt cannot initiate model inference.
+export async function inspectSubscriptionAccount(cwd: string, runtime: RuntimeOptions = {}, queryImpl: typeof query = query,
+  callerSignal?: AbortSignal): Promise<string | null> {
+  let release!: () => void;
+  const idle = new Promise<void>(resolve => {release = resolve;});
+  const abortController = new AbortController();
+  const abort = () => abortController.abort(callerSignal?.reason);
+  callerSignal?.addEventListener('abort', abort, {once: true});
+  if (callerSignal?.aborted) abort();
+  const {signal} = abortController;
+  const timer = setTimeout(() => abortController.abort(), 30000);
+  let session: ReturnType<typeof query> | undefined;
+  try {
+    const verified = await raceAbort(guardRuntime(cwd, runtime, signal), signal);
+    session = queryImpl({prompt: (async function* () {await idle;})(), options: {...isolatedOptions(cwd), abortController,
+      ...(verified.claudePath ? {pathToClaudeCodeExecutable: verified.claudePath} : {})}});
+    const account = await raceAbort(session.accountInfo(), signal);
+    requireSubscription(account);
+    return accountFingerprint(account);
+  } finally {
+    clearTimeout(timer); callerSignal?.removeEventListener('abort', abort); release();
+    try {session?.close();} catch {/* closing is best effort */}
   }
 }
 
@@ -199,13 +232,16 @@ export function sdkRunner(cwd: string, models: ClaudeModel[], queryImpl: typeof 
       let direct: string | undefined;
       const authenticated = new Promise<void>(resolve => {release = resolve;});
       const contextTracker = new ContextUsageTracker(model);
+      const limits = new SubscriptionLimitTracker();
       const content = promptContent(prepared);
       session = queryImpl({prompt: (async function* (): AsyncGenerator<SDKUserMessage> {
         await authenticated;
         if (permitted && !abortController.signal.aborted) yield {type: 'user', session_id: '', parent_tool_use_id: null,
           message: {role: 'user', content: note ? [...content, {type: 'text', text: note}] : content}};
       })(), options});
-      requireSubscription(await raceAbort(session.accountInfo(), abortController.signal));
+      const account = await raceAbort(session.accountInfo(), abortController.signal);
+      requireSubscription(account);
+      const accountId = accountFingerprint(account);
       permitted = true; stage = 'prompt_released'; releasedClock ??= performance.now(); release();
       const iterator = session[Symbol.asyncIterator]();
       for (;;) {
@@ -216,11 +252,14 @@ export function sdkRunner(cwd: string, models: ClaudeModel[], queryImpl: typeof 
         progress();
         lastEvent = eventLabel(message); lastEventClock = performance.now();
         if (message.type === 'result') {final = message; stage = 'final_received'; break;}
+        limits.observe(message);
         direct ??= nativeToolCall(message);
         contextTracker.observe(message);
       }
       if (!final) throw new BridgeError(502, 'incomplete_sdk', 'Claude SDK ended without a result.');
       if (final.subtype !== 'success' || final.is_error) {
+        const quota = limits.terminalError(final, accountId);
+        if (quota) throw quota;
         throw new BridgeError(502, 'claude_failed', `Claude SDK did not complete successfully (${safeCode(final.subtype)}). Check Claude login, usage limits and model access.`);
       }
       const evidence = summarizeFinal(final);
@@ -239,7 +278,9 @@ export function sdkRunner(cwd: string, models: ClaudeModel[], queryImpl: typeof 
         throw new BridgeError(502, 'native_tool_call', `Claude called ${direct} as a native tool and then returned no calls.`, {tool: direct,
           reason: `During this step you called "${direct}" as a native tool. This session has no native tools, so only that one direct call failed with "No such tool available". Codex tools work normally, and every tool result already in the conversation was really executed and is valid. If you still need a tool, put the request in the calls array of the structured decision; otherwise answer from the existing results.`});
       }
-      return {decision, usage: context.usage};
+      const completed: StepResult = {decision, usage: context.usage};
+      if (accountId) subscriptionResultAccounts.set(completed, accountId);
+      return completed;
     };
     try {
       verified = await raceAbort(guardRuntime(cwd, runtime, abortController.signal), abortController.signal);

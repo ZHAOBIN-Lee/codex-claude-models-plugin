@@ -296,17 +296,22 @@ test('cancelling while the guard is still running aborts the attempt without cre
   assert.equal(json.query_ms, null);
 });
 
-test('an account that is not a first-party Pro or Max login fails before the prompt is released and is closed once', {timeout: 30000}, async t => {
+test('an account that is not a supported first-party subscription fails before the prompt is released and is closed once', {timeout: 30000}, async t => {
   const accounts: [string, Record<string, unknown>][] = [
     ['first-party account with an unknown plan', {apiProvider: 'firstParty', subscriptionType: 'team', email: ACCOUNT_SENTINEL}],
     ['another provider', {apiProvider: 'bedrock', subscriptionType: 'pro', email: ACCOUNT_SENTINEL}],
+    ['Ultra on another provider', {apiProvider: 'bedrock', subscriptionType: 'Claude Ultra', email: ACCOUNT_SENTINEL}],
     ['no plan at all', {apiProvider: 'firstParty', email: ACCOUNT_SENTINEL}],
   ];
   for (const [name, account] of accounts) {
     await t.test(name, async st => {
       const w = await workspace(st);
       const fake = fakeQuery({final: finalMessage(), account: async () => account});
-      await assert.rejects(run(w, fake), (error: any) => error.code === 'subscription_required');
+      await assert.rejects(run(w, fake), (error: any) => {
+        assert.equal(error.code, 'subscription_required');
+        assert.doesNotMatch(error.message, /API-key fallback is disabled/, 'authentication errors cannot claim to know the API configuration');
+        return true;
+      });
       assert.equal(fake.state.created, 1);
       assert.equal(fake.state.closed, 1);
       const next = await Promise.race([fake.state.prompt!.next(), sleep(1000).then(() => 'hung' as const)]);
@@ -321,6 +326,20 @@ test('an account that is not a first-party Pro or Max login fails before the pro
       assert.equal(json.query_ms, null);
     });
   }
+});
+
+test('a first-party Claude Ultra account can discover models and complete a subscription step', async t => {
+  const w = await workspace(t);
+  const account = async () => ({...await proAccount(), subscriptionType: 'Claude Ultra'});
+  const fake = fakeQuery({account, final: finalMessage(), models: async () => [
+    {value: 'sonnet', displayName: 'Sonnet', description: 'Balanced', supportedEffortLevels: ['medium']},
+  ]});
+  const inspected = await inspectSdk(w.cwd, {guard: okGuard}, fake.query);
+  assert.equal(inspected.authenticated, true);
+  assert.equal(inspected.subscriptionType, 'ultra');
+  assert.deepEqual(inspected.models.map(model => model.id), ['claude-sdk-sonnet']);
+  assert.equal((await run(w, fake)).decision.text, 'fixture answer');
+  assert.equal((await onlyReceipt(w)).json.status, 'complete');
 });
 
 test('inspectSdk validates the account before it asks for models', {timeout: 20000}, async t => {

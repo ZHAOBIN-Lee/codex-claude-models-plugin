@@ -15,7 +15,9 @@ Codex 在自己的沙箱和审批下执行这些工具调用，显示出来，�
 
 Claude 的决策直接交给 Codex，由 Codex 执行并显示真实的工具调用。它不是逐 token 流：每个决策要等完整返回才显示，Claude 的隐藏思考和内部步骤看不到。
 
-不开放任何 SDK 执行工具（只有结构化输出那一个）。每一步都是新的 SDK 查询，连续性来自 Codex 的聊天历史，不是 SDK 续接。某一步的 SDK 会话 ID 不是 Codex 的线程 ID。
+不开放任何 SDK 执行工具（只有结构化输出那一个）。每一步订阅调用都是新的 SDK 查询，连续性来自 Codex 的聊天历史，不是 SDK 续接。某一步的 SDK 会话 ID 不是 Codex 的线程 ID。
+
+可选 [API 回退](API-FALLBACK.zh-CN.md)会在明确的订阅额度失败后转向 Anthropic 官方 API，复用已准备历史和决策校验，单独保存私有账本与回执。它在明确配置前保持关闭，不会为 API 响应伪造 SDK 会话 ID。
 
 ## 修了什么
 
@@ -27,7 +29,7 @@ Claude 的决策直接交给 Codex，由 Codex 执行并显示真实的工具调
 - 运行目录交换失败但其实已生效时，用保存的副本恢复原安装。只有确认是这次安装放进去的目录才会删。
 - 你之后的编辑会保留。如果你把工具自有的某项设置改成了第三个值，所有操作都会报冲突并拒绝覆盖，直到你把它改回来。
 
-**每一步 Claude 调用前都跑运行守卫，回执完整。**
+**每一步订阅调用前都跑运行守卫，回执完整。**
 
 - 顺序：原始环境（路线和凭证变量，只报名字）→ 私有政策文件（权限 600、不是符号链接、严格字段）→ 扫描本地设置 → 固定的 CLI（先算 SHA-256，再核版本，再用 `auth status` 确认是 `claude.ai` 的 Pro 或 Max）→ SDK 账户检查（第一方、Pro 或 Max）。先扫描设置再跑 CLI，是因为设置文件里的辅助程序可能在 CLI 启动时就执行，连 `--version` 也一样。
 - 扫描范围：你的主目录里的 Claude 设置、目录树上层的项目文件、托管设置文件和 drop-in、本地 macOS 托管偏好文件、Anthropic 配置档。符号链接和无法核实的文件一律拒绝。覆盖范围只记录为 `local_file_scan`，不检查远程、MDM 或 Windows 策略。另外 `settingSources: []` 并不能关掉托管设置，它们在 SDK 会话里照样会加载。
@@ -42,6 +44,8 @@ Claude 的决策直接交给 Codex，由 Codex 执行并显示真实的工具调
 **并发与排队。** router 同时最多跑 6 个 Claude 步骤（`concurrency`）。GPT 请求不再占名额：批量迁移后所有 GPT 聊天和子代理都经过 router，长时间的 GPT 流式输出占满了 6 个名额，router 自己对 GPT 和 Claude 都返回了 `429 busy`（Codex 不重试，`request_max_retries = 0`）。现在超出上限的 Claude 步骤按先来后到排队，最多等 `queueMs`（默认 120 秒）；流式请求已经收到 200 响应头和心跳，所以超时会以 `response.failed`、代码 `busy` 的事件返回。
 
 **直接调用原生工具。** SDK 会话以 `tools: []` 运行，使用 Codex 工具的唯一方式是结构化回复里的 `calls`。Opus 和 Sonnet 都偶尔会直接调用 `exec_command`、`apply_patch` 或 `tool_search`。SDK 返回 “No such tool available”，权限拒绝列表仍为空，模型随后交回一份格式合法、却声称 Codex 工具不可用的回复。`src/sdk.ts` 里的 `nativeToolCall` 会检查主模型的消息流（忽略子代理内部的调用和 `StructuredOutput`）。第一版一发现直接调用就中断这次尝试；实际使用中，这类步骤大多已经在同一次查询里把调用写进 `calls` 自行改正，中断反而让耗时翻倍，提示里的 “nothing was executed” 还让 Sonnet 把同一条命令重跑了八次，连续两次被拦截时整轮直接失败。现在回复里有 `calls` 就直接保留；只有首次尝试在直接调用之后交回没有 `calls` 的回复，才以代码 `native_tool_call` 重试一次，提示说明已有的工具结果都是真实的；重试那一次不会再因此被拒。凭证里记录为 `rejected: {code: "native_tool_call", tool}`。
+
+**历史中的补充工具声明。** Codex 0.163.0-alpha.10.2 在 GPT 模型以代码模式（`tool_mode: code_mode_only`）运行时，会写入 `additional_tools` 开发者记录，例如声明 `functions.exec`。切到 Claude 后这些记录仍留在聊天历史里，以前会让每一步 Claude 调用都报 `Unsupported history item: additional_tools`。现在两条 Claude 路径都把这类记录当作可读的历史，保留函数参数和自定义语法，按时间追加成块，已缓存的 system 提示不变。它们只是背景信息：Claude 模型不在代码模式，Codex 在 Claude 这一步不会注册这些工具，调用会报 `unsupported custom tool call`。所以可调用的工具仍然只有当前 `request.tools` 加上 `tool_search` 的结果。单条声明内重名、声明容器格式错误返回 400；其他未知历史类型仍明确拒绝。旧聊天不需要迁移，GPT 请求继续透传。
 
 ## 已验证与未验证
 
@@ -149,7 +153,7 @@ node "$SETUP_MJS" uninstall --codex-home "$TARGET_HOME"
 - `deactivate` 恢复原来的提供方、目录和默认设置，并移除自有钩子及其信任。`uninstall` 还会移除未被改动的生成提供方、目录和 Agent 文件。
 - 如果你改过工具自有的字段，它会拒绝，文件和备份原样保留，并告诉你是哪一项。把值改回去（或者确认它归你）再运行。不要强行把整份旧配置盖回你之后的编辑上，不要删 `~/.codex`，也不要去杀别的服务；`stop` 只停这个工具自己的桥接服务。
 - 备份请保留。运行目录、私有政策和回执在 `uninstall` 之后有意保留，等你不再需要它们作证据时自己再删。
-- 整个过程没有任何自动 API 回退。
+- API 回退默认关闭。如果你曾明确启用，执行 `node "$SETUP_MJS" api-disable --codex-home "$TARGET_HOME"` 关闭。私有 API 凭据和账本保留；关闭或重装不会清除未结算费用。见 [API 回退说明](API-FALLBACK.zh-CN.md)。
 
 ## 出问题时
 

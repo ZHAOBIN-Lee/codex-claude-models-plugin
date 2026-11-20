@@ -19,7 +19,7 @@ This is a modified version of [Reidond/codex-claude-models-plugin](https://githu
 - **Claude spawning GPT sub-agents.** The desktop app uses Codex's v2 sub-agent protocol, which puts the task in an `encrypted_content` field. A Claude parent writes plain text there, and OpenAI rejected the GPT sub-agent's first request with "Encrypted function output content could not be decrypted or decoded". The router now turns such plain-text fields into ordinary text before forwarding; real OpenAI ciphertext (`gAAAAA…`) and every other GPT request are forwarded unchanged.
 - **Concurrency.** Only Claude steps count toward the limit of 6, because each one runs a Claude Code process. GPT requests are a plain proxy and are never limited by the router; counting them caused local `429 Too Many Requests` once all chats went through the router. An extra Claude step waits in line (streamed requests keep receiving heartbeats) and fails as `busy` only after 2 minutes without a free slot.
 - **Direct tool calls.** The Claude SDK session has no native tools; Codex tools go in the decision's `calls`. Claude sometimes still called `exec_command` or `apply_patch` directly and got "No such tool available". Usually it recovers in the same step and returns the call in `calls`, and that answer is kept. If it instead answers with no `calls` (for example "Codex tools are broken"), the router retries that step once with a note that names the tool and says earlier tool results are real.
-- **Guard rails.** Claude runs only through a pinned official CLI (path, version and SHA-256), with a subscription login and no API fallback. Every attempt writes a private receipt with the actual model and session.
+- **Guard rails.** The subscription route uses a pinned official CLI (path, version and SHA-256) and a subscription login. API fallback is disabled by default; an optional official API route requires separate private credentials and explicit budgets. Attempts write private receipts; API attempts do not invent an SDK session.
 - **Parallel sub-agents.** When `spawn_agent` is offered, Claude is told to spawn independent sub-agents together: several `spawn_agent` calls in one decision, up to the free concurrency slots, then wait for all of them. Sub-agents that edit files run in parallel only when their file sets do not overlap. Before this, every Claude parent in the maintainer's chats spawned exactly one sub-agent per step.
 - **Image generation.** Codex sends `/v1/images/generations` and `/v1/images/edits` to the active provider. After all chats were migrated to the router, these returned 404 because the router only forwarded `/v1/responses`. They are now proxied byte for byte (including multipart edits) to the matching ChatGPT backend routes with your own Codex login, without a model-catalog check.
 - **Restarts and timeouts.** Stopping the router now drains: it refuses new connections at once, lets Claude and GPT requests in flight finish (up to 16 min), then exits; a second signal exits immediately. A Claude step with xhigh/max effort or a large request (about 1.2 MB or more) may stay silent for 300 s instead of 180 s. Receipts record a router timeout as `timeout_stall`/`timeout_hard` (no longer as a user cancel) with `last_event` and `last_event_age_ms`. A GPT request that cannot reach OpenAI now fails as `openai_upstream_failed` or `openai_idle_timeout` instead of the generic "Claude bridge failed".
@@ -52,7 +52,7 @@ Not checked:
 
 - Node.js 22+ (we used 24.19.0) and npm.
 - The Codex CLI you actually use, by absolute path.
-- The official Claude CLI, and your own claude.ai Pro or Max login. API-key and Console routes aren't supported.
+- The official Claude CLI, and your own claude.ai Pro, Max or Ultra login. The subscription path requires this login. Optional API fallback uses a separate credential file; see [API fallback](API-FALLBACK.md).
 - macOS. Only macOS has been accepted so far; Linux and Windows are untested, even though the config text looks generic.
 
 ## Build and try it in an isolated home
@@ -108,15 +108,27 @@ Do this only after you've read the concrete config diff and rollback steps in [A
 2. Restart Codex once and start a new chat. Old chats keep their original provider, and picking Claude in them fails with "not supported when using Codex with a ChatGPT account". To move them, see [MIGRATION.md](MIGRATION.md).
 3. Your GPT default stays as it was. `deactivate` and `uninstall` undo the owned changes.
 
+## Updating an existing install
+
+1. Pull the latest code in the repository: `git pull`. The built `bin/bridge.mjs` and `bin/setup.mjs` are committed, so no build step is needed.
+2. Let any running Claude or GPT reply finish, then run `node plugins/codex-claude-models/bin/setup.mjs install`. It stops the router, replaces the runtime and starts it again. Set `NPM_BIN` first if npm is not on your `PATH`.
+3. Quit Codex completely and reopen it so the model picker reloads.
+
+Reinstalling rereads Codex's cached OpenAI model list, so newly released GPT models join the picker. Your Claude login, router token, and API fallback credentials, budgets and ledger are kept as they are; a disabled fallback stays disabled.
+
 ## What to expect
 
 - Claude's decision is buffered until it is complete. You see Codex's own events when Codex runs a tool, not Claude's hidden thinking or every internal step.
 - Text, and images in the current turn. Older images become placeholders. Audio, Codex output-schema mode and server-stored response IDs fail with a clear error.
-- Each step is a fresh SDK query. Continuity comes from Codex's chat history; the SDK session ID of a step is not the Codex thread ID.
+- Each subscription step is a fresh SDK query. Continuity comes from Codex's chat history; the SDK session ID of a step is not the Codex thread ID. API fallback uses the same prepared history and does not have an SDK session ID.
 - The final SDK usage for a step can list both the chosen model and Haiku. We haven't established why the CLI uses Haiku, and make no promise about extra usage.
-- Retries are limited to the cases above. There is no API fallback, and a cancel and a refusal are recorded as different things.
-- The guard refuses to run, naming the variable or file, if it finds API-key or route overrides: `ANTHROPIC_*`, OpenAI key or URL variables, helper settings in Claude's settings files, or an Anthropic profile.
-- Each inference attempt writes a private receipt in `<home>/claude-models/receipts` (mode 600). Model names and the session ID come only from the final result, never from the alias or the model's own claim.
+- Subscription retries are limited to the cases above. Optional paid fallback requires a definitive structured subscription quota failure; API attempts are never automatically retried. Cancels and refusals are recorded separately.
+- The subscription guard refuses to run, naming the variable or file, if it finds API-key or route overrides: `ANTHROPIC_*`, OpenAI key or URL variables, helper settings in Claude's settings files, or an Anthropic profile. Separate API fallback credentials do not change the subscription environment.
+- Subscription attempts write private receipts in `<home>/claude-models/receipts`; API attempts use `<home>/claude-models/api/receipts` (mode 600). Actual models and provider identifiers come from returned metadata, never from an alias or the model's own claim.
+
+## Optional API fallback
+
+Installation leaves paid fallback disabled. [The API guide](API-FALLBACK.md) covers hidden credential entry, explicit daily and per-request budgets, optional cumulative limits, five-minute caching, and disabling it again. `api-status` and `doctor` report configuration status without paid inference; `configured_unverified` does not establish API access, billing or a successful paid request.
 
 ## Account terms
 

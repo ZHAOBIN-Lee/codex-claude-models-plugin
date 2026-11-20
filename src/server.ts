@@ -6,6 +6,7 @@ import { BridgeError, isCompactionRequest, requestSchema, preparePrompt, validat
 import { completedResponse, completionEvents, responseEnvelope } from './adapter.js';
 import { IMAGE_ROUTES, ROUTER_TOKEN_HEADER, forwardedResponseHeaders, portableAgentMessages, type ForwardOpenAI } from './openai.js';
 import { VERSION } from './version.js';
+import { registerStepContext } from './paid-step-guard.js';
 
 export interface ServerOptions {
   // timeoutMs / compactionTimeoutMs: longest stretch without model activity; maxStepMs: hard cap for any Claude step.
@@ -142,6 +143,7 @@ export function bridgeServer(options: ServerOptions) {
       const parsed = requestSchema.safeParse(payload.json);
       if (!parsed.success) throw new BridgeError(400, 'invalid_request', 'Invalid Responses request.');
       const request = parsed.data;
+      registerStepContext(request, req.headers);
       preparePrompt(request);
       const compaction = isCompactionRequest(request);
       const envelope = base = responseEnvelope(request.model);

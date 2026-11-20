@@ -10,6 +10,8 @@ import { codexCatalog, combinedCatalog, openaiCatalogSchema, type OpenAICatalog,
 import { VERSION } from './version.js';
 import { codexBin, withCodexRpc } from './codex-rpc.js';
 import { routerEnvironment } from './runtime-policy.js';
+import { apiStatus, disableApiFallback, readApiCredentials, saveApiConfig } from './api-settings.js';
+import { BridgeError } from './contracts.js';
 
 const exec = promisify(execFile);
 
@@ -634,11 +636,71 @@ export async function readOpenAICatalog(p: Paths): Promise<{catalog: OpenAICatal
   return {catalog: openaiCatalogSchema.parse(JSON.parse(stdout)), source: 'bundled'};
 }
 
-export async function setupMain() {
-  const args = process.argv.slice(2);
+type AccountInspector = (cwd: string, runtime: {runtimePolicyPath: string; receiptsDir: string}) => Promise<string | null>;
+interface SetupOptions {inspectAccount?: AccountInspector; log?: (message: string) => void}
+
+async function inspectInstalledAccount(p: Paths): Promise<string | null> {
+  // setup.mjs is also run before the SDK is installed and is copied outside runtime/node_modules.
+  // Keep the SDK import in the installed bridge, whose account command performs only its gated handshake.
+  try {
+    const {stdout} = await exec(process.execPath, [path.join(p.runtime, 'bridge.mjs'), 'account', '--codex-home', p.home],
+      {timeout: 40000, maxBuffer: 16 * 1024, env: routerEnvironment()});
+    const value = JSON.parse(stdout) as {accountId?: unknown};
+    return typeof value.accountId === 'string' && /^[a-f0-9]{64}$/.test(value.accountId) ? value.accountId : null;
+  } catch {
+    // Subprocess diagnostics can contain account identifiers; only this fixed diagnostic is printed.
+    throw new BridgeError(424, 'api_account_unverified', 'The live subscription account could not be checked. Run doctor and retry api-enable.');
+  }
+}
+
+function apiArguments(args: string[]) {
+  const flags = new Map<string, string>();
+  const allowed = new Set(args[0] === 'api-enable'
+    ? ['--codex-home', '--daily-usd', '--per-request-usd', '--total-usd', '--max-output-tokens', '--cache'] : ['--codex-home']);
+  const invalid = () => new BridgeError(400, 'api_setup_arguments',
+    'Invalid API setup options. api-enable requires --daily-usd N and --per-request-usd N; optional: --total-usd N, --max-output-tokens N, --cache off|5m, --codex-home PATH.');
+  for (let index = 1; index < args.length; index += 2) {
+    const key = args[index]!, value = args[index + 1];
+    if (!allowed.has(key) || flags.has(key) || !value || value.startsWith('--')) throw invalid();
+    flags.set(key, value);
+  }
+  if (args[0] !== 'api-enable') return undefined;
+  const positive = (flag: string, required = true) => {
+    const raw = flags.get(flag);
+    if (raw === undefined && !required) return undefined;
+    if (raw === undefined || !/^(?:\d+(?:\.\d*)?|\.\d+)$/.test(raw)) throw invalid();
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value <= 0 || value > 100000) throw invalid();
+    return value;
+  };
+  const dailyLimitUsd = positive('--daily-usd')!, perRequestLimitUsd = positive('--per-request-usd')!;
+  const totalLimitUsd = positive('--total-usd', false);
+  const maxOutputTokens = Number(flags.get('--max-output-tokens') ?? 8192), cache = flags.get('--cache') ?? '5m';
+  if (perRequestLimitUsd > dailyLimitUsd || (totalLimitUsd !== undefined && perRequestLimitUsd > totalLimitUsd)
+    || !Number.isInteger(maxOutputTokens) || maxOutputTokens < 256 || maxOutputTokens > 128000 || !['off', '5m'].includes(cache)) throw invalid();
+  return {schema_version: 1, enabled: true, dailyLimitUsd, perRequestLimitUsd,
+    ...(totalLimitUsd === undefined ? {} : {totalLimitUsd}), maxOutputTokens, cache};
+}
+
+export async function setupMain(args = process.argv.slice(2), options: SetupOptions = {}) {
   const get = (key: string) => {const i = args.indexOf(key); return i < 0 ? undefined : args[i + 1];};
   const p = locations(get('--codex-home'));
   const command = args[0];
+  if (command === 'api-status' || command === 'api-disable' || command === 'api-enable') {
+    const config = apiArguments(args), root = path.join(p.root, 'api');
+    if (command === 'api-disable') await withLock(p, () => disableApiFallback(root));
+    if (command === 'api-enable') await withLock(p, async () => {
+      await readApiCredentials(root);
+      const runtime = {runtimePolicyPath: path.join(p.root, 'runtime-policy.json'), receiptsDir: path.join(p.root, 'receipts')};
+      const accountId = options.inspectAccount
+        ? await options.inspectAccount(path.join(p.root, 'sdk-cwd'), runtime) : await inspectInstalledAccount(p);
+      if (typeof accountId !== 'string' || !/^[a-f0-9]{64}$/.test(accountId)) throw new BridgeError(424, 'api_account_unverified',
+        'The current subscription account has no verifiable identity. Paid fallback remains unavailable.');
+      await saveApiConfig(root, {...config, confirmedSubscriptionAccount: accountId});
+    });
+    (options.log ?? console.log)(JSON.stringify(await apiStatus(root), null, 2));
+    return;
+  }
   switch (command) {
     case 'install': await withLock(p, async () => {
       const models = await install(p, Number(get('--port') ?? 47832));
@@ -656,10 +718,13 @@ export async function setupMain() {
     case 'doctor': {
       const state = await readState(p);
       const {stdout} = await exec(process.execPath, [path.join(p.runtime, 'bridge.mjs'), 'models', '--codex-home', p.home], {timeout: 40000});
-      console.log(JSON.stringify({...(JSON.parse(stdout) as Config), bridgeRunning: !!await health(p, state),
+      (options.log ?? console.log)(JSON.stringify({...(JSON.parse(stdout) as Config), bridgeRunning: !!await health(p, state),
         activated: !!state.selected, routerActivated: state.selected?.model_provider === ROUTER,
-        openaiModels: state.openaiModels ?? [], node: process.version, codexHome: p.home}, null, 2)); break;
+        openaiModels: state.openaiModels ?? [], node: process.version, codexHome: p.home,
+        apiFallback: await apiStatus(path.join(p.root, 'api'))}, null, 2)); break;
     }
-    default: console.log('Usage: node setup.mjs install|activate-router|activate|deactivate|uninstall|doctor|start|stop [--codex-home PATH] [--port 47832] [--model ID]');
+    default: console.log('Usage: node setup.mjs install|activate-router|activate|deactivate|uninstall|doctor|start|stop [--codex-home PATH] [--port 47832] [--model ID]\n' +
+      'API fallback (disabled by default): api-status|api-disable [--codex-home PATH]\n' +
+      'api-enable --daily-usd N --per-request-usd N [--total-usd N] [--max-output-tokens N] [--cache off|5m] [--codex-home PATH]');
   }
 }
