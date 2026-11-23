@@ -288,7 +288,7 @@ function generatedFiles(p: Paths, models: ClaudeModel[], openai?: OpenAICatalog)
   files[path.join(p.home, 'claude.config.toml')] = TOML.stringify({model_provider: PROVIDER, model: defaultModel(models).id,
     model_catalog_json: p.catalog, web_search: 'disabled', agents: {default_subagent_model: defaultModel(models).id}} as TOML.JsonMap);
   for (const model of models) {
-    const name = model.sdkModel.startsWith('opus') ? 'claude_opus' : model.sdkModel === 'sonnet' ? 'claude_sonnet'
+    const name = model.account ? model.id.replaceAll('-', '_') : model.sdkModel.startsWith('opus') ? 'claude_opus' : model.sdkModel === 'sonnet' ? 'claude_sonnet'
       : model.sdkModel === 'haiku' ? 'claude_haiku' : model.id.replaceAll('-', '_');
     files[path.join(p.home, 'agents', `${name}.toml`)] = TOML.stringify({
       name, description: `Use ${model.displayName} through the installed unified model router or Claude-only profile for a scoped task.`,

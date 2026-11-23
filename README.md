@@ -116,6 +116,24 @@ Do this only after you've read the concrete config diff and rollback steps in [A
 
 Reinstalling rereads Codex's cached OpenAI model list, so newly released GPT models join the picker. Your Claude login, router token, and API fallback credentials, budgets and ledger are kept as they are; a disabled fallback stays disabled.
 
+## Choosing a subscription account manually
+
+Sign in to each account with the official Claude Code first, giving the second account its own `CLAUDE_CONFIG_DIR`. Run `node plugins/codex-claude-models/bin/bridge.mjs account` to get the default account's `accountId`, and add `--claude-config-dir /absolute/path/to/profile` to get the other account's identity fingerprint. These checks only read the login identity.
+
+Save the following in `<Codex home>/claude-models/subscription-accounts.json`, replacing each `fingerprint` with the 64-character `accountId` returned by the check, and set the file mode to `600`. `label` is the account suffix shown in the model picker.
+
+```json
+{
+  "schema_version": 1,
+  "accounts": [
+    {"id": "a", "label": "A", "fingerprint": "accountId of the default account"},
+    {"id": "b", "label": "B", "configDir": "/absolute/path/to/profile", "fingerprint": "accountId of the second account"}
+  ]
+}
+```
+
+After installing as described under updating, the picker shows entries such as `Claude Opus · A` and `Claude Opus · B`. The entry selected in a chat decides which account later requests use, and Codex keeps passing the existing history. Each request checks the account identity before sending history and fails clearly if the login was replaced. Account-labelled entries use their own subscription and return that account's quota error when it runs out. The original model IDs remain available for older chats, and the existing API fallback settings still apply to them.
+
 ## What to expect
 
 - Claude's decision is buffered until it is complete. You see Codex's own events when Codex runs a tool, not Claude's hidden thinking or every internal step.

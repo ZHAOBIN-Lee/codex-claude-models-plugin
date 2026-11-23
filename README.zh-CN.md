@@ -118,6 +118,24 @@ CODEX_BIN="$REAL_CODEX" ./node_modules/.bin/tsx scripts/native-acceptance.ts --l
 
 重装会重新读取 Codex 缓存的 OpenAI 模型列表，所以 OpenAI 新推出的 GPT 模型会一起加入模型菜单。Claude 登录、router 令牌，以及 API 回退的凭据、预算和账本都会原样保留；回退原来关闭的，更新后仍然关闭。
 
+## 手动选择订阅账号
+
+先通过官方 Claude Code 登录各账号，为第二个账号设置独立的 `CLAUDE_CONFIG_DIR`。用 `node plugins/codex-claude-models/bin/bridge.mjs account` 获取默认账号的 `accountId`，带上 `--claude-config-dir /绝对路径/账号目录` 获取另一个账号的身份指纹。这些检查只读取登录身份。
+
+在 `<Codex home>/claude-models/subscription-accounts.json` 保存以下结构，将 `fingerprint` 换成检查返回的 64 位 `accountId`，并把文件权限设为 `600`。`label` 是模型菜单里的账号后缀。
+
+```json
+{
+  "schema_version": 1,
+  "accounts": [
+    {"id": "a", "label": "A", "fingerprint": "默认账号的 accountId"},
+    {"id": "b", "label": "B", "configDir": "/绝对路径/账号目录", "fingerprint": "第二个账号的 accountId"}
+  ]
+}
+```
+
+按更新步骤安装后，模型菜单会显示 `Claude Opus · A`、`Claude Opus · B` 等条目。当前聊天选中的条目决定后续请求使用的账号，Codex 提供的历史会继续传入。每次请求会在发送历史前核对账号身份，登录被替换时会明确报错。带账号标签的条目使用对应订阅，额度耗尽时返回该账号的额度错误。原有模型标识仍可供旧聊天使用，原有 API 回退设置继续适用于这些旧标识。
+
 ## 使用时要知道
 
 - Claude 的决策要等完整返回才显示。Codex 执行工具时会显示 Codex 自己的事件，看不到 Claude 的隐藏思考，也看不到它内部的每一步。

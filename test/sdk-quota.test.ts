@@ -216,3 +216,46 @@ test('a successful retried decision is bound to the account observed for its own
   assert.equal(evidence(result), accountFingerprint(secondAccount));
   assert.notEqual(evidence(result), accountFingerprint(identity));
 });
+
+test('a selected account refuses a different login before sending conversation contents', async t => {
+  const f = await fixture(t, usageStream('msg_account', usage), finalResult());
+  const accountModels = [{...models[0]!, account: {id: 'b', label: 'B', configDir: '/fixture/b', fingerprint: 'b'.repeat(64)}}];
+  const run = sdk.sdkRunner(f.root, accountModels, f.query, f.runtime);
+  await assert.rejects(run(requestSchema.parse({model: accountModels[0]!.id, input: 'private conversation'}), new AbortController().signal),
+    (error: unknown) => error instanceof BridgeError && error.code === 'subscription_account_changed');
+  assert.equal(f.state.delivered, 0);
+  assert.equal(f.state.closed, 1);
+  const receipt = JSON.parse((await f.receipts())[0]!);
+  assert.equal(receipt.subscription_account_id, 'b');
+  assert.equal(receipt.inference_stage, 'not_started');
+});
+
+test('parallel account selections isolate child environments and preserve the supplied history when switching', async t => {
+  const f = await fixture(t, []);
+  const other = {...identity, email: 'other@example.invalid'};
+  const accountModels = [
+    {...models[0]!, id: 'claude-sdk-sonnet-account-a', account: {id: 'a', label: 'A', fingerprint: accountFingerprint(identity)!}},
+    {...models[0]!, id: 'claude-sdk-sonnet-account-b', account: {id: 'b', label: 'B', configDir: '/fixture/b', fingerprint: accountFingerprint(other)!}},
+  ];
+  const seen: Array<{configDir: string | undefined; prompt: unknown[]}> = [];
+  const sourceConfigDir = process.env.CLAUDE_CONFIG_DIR;
+  const query = ((args: any) => {
+    const row = {configDir: args.options.env.CLAUDE_CONFIG_DIR as string | undefined, prompt: [] as unknown[]};
+    seen.push(row);
+    return Object.assign((async function* () {
+      for await (const message of args.prompt) row.prompt.push(message);
+      yield* usageStream('msg_selected_account', usage);
+      yield finalResult();
+    })(), {accountInfo: async () => row.configDir ? other : identity, close() {}});
+  }) as unknown as Parameters<typeof sdk.sdkRunner>[2];
+  const run = sdk.sdkRunner(f.root, accountModels, query, f.runtime);
+  const input = [{role: 'user', content: 'Earlier context marker 83f1'}, {role: 'assistant', content: 'Remembered'}, {role: 'user', content: 'Continue'}];
+  const results = await Promise.all(accountModels.map(model => run(requestSchema.parse({model: model.id, input}), new AbortController().signal)));
+  assert.deepEqual(seen.map(row => row.configDir), [undefined, '/fixture/b']);
+  assert.equal(process.env.CLAUDE_CONFIG_DIR, sourceConfigDir);
+  assert.deepEqual(seen[0]!.prompt, seen[1]!.prompt);
+  assert.ok(JSON.stringify(seen[1]!.prompt).includes('Earlier context marker 83f1'));
+  assert.deepEqual(results.map(sdk.subscriptionResultAccount), [accountFingerprint(identity), accountFingerprint(other)]);
+  const receipts = (await f.receipts()).map(raw => JSON.parse(raw));
+  assert.deepEqual(receipts.map(row => row.subscription_account_id).sort(), ['a', 'b']);
+});

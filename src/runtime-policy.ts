@@ -157,6 +157,7 @@ async function exists(file: string) {
 export interface ScanOptions {
   cwd: string;
   home?: string;
+  configDir?: string;
   platform?: NodeJS.Platform;
   managedDirs?: string[];
   managedPreferenceFiles?: string[];
@@ -192,6 +193,15 @@ export async function scanClaudeSettings(options: ScanOptions) {
     files.set(path.join(dir, '.claude.json'), CLAUDE_JSON_LIMIT);
   };
   addUserLevel(home);
+  if (options.configDir !== undefined) {
+    if (!path.isAbsolute(options.configDir) || !await requirePlainDirectory(options.configDir, 'The selected Claude account directory')) {
+      throw blocked('The selected Claude account directory must be an existing absolute directory.');
+    }
+    settingsDirs.add(options.configDir);
+    files.set(path.join(options.configDir, 'settings.json'), SETTINGS_LIMIT);
+    files.set(path.join(options.configDir, 'settings.local.json'), SETTINGS_LIMIT);
+    files.set(path.join(options.configDir, '.claude.json'), CLAUDE_JSON_LIMIT);
+  }
   // The SDK directory and every ancestor can carry project-level settings and a .claude.json.
   for (let dir = path.resolve(options.cwd); ; dir = path.dirname(dir)) {
     addUserLevel(dir);

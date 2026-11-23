@@ -98,6 +98,21 @@ test('a clean Claude home passes and reports local-file coverage only', async t 
   assert.equal((await run()).coverage, 'local_file_scan');
 });
 
+test('the selected account configuration is checked before its native CLI can run', async t => {
+  const home = await temp(t);
+  const configDir = path.join(home, 'secondary');
+  await fs.mkdir(configDir);
+  const options = {home, cwd: home, configDir, platform: 'linux' as const, managedDirs: [], managedPreferenceFiles: [], env: {}};
+  assert.equal((await scanClaudeSettings(options)).coverage, 'local_file_scan');
+  await fs.writeFile(path.join(configDir, '.claude.json'), JSON.stringify({apiKeyHelper: SECRET}));
+  await assert.rejects(scanClaudeSettings(options), /apiKeyHelper/);
+  await fs.rm(path.join(configDir, '.claude.json'));
+  await fs.writeFile(path.join(configDir, 'settings.json'), JSON.stringify({env: {ANTHROPIC_BASE_URL: SECRET}}));
+  await assert.rejects(scanClaudeSettings(options), /ANTHROPIC_BASE_URL/);
+  await assert.rejects(scanClaudeSettings({...options, configDir: 'relative'}), /absolute/);
+  await assert.rejects(scanClaudeSettings({...options, configDir: path.join(home, 'missing')}), /existing/);
+});
+
 test('route-affecting Claude settings are refused wherever they appear', async t => {
   const cases: [string, Record<string, unknown>, RegExp][] = [
     ['env base URL in user settings', {'.claude/settings.json': {env: {ANTHROPIC_BASE_URL: SECRET}}}, /env\.ANTHROPIC_BASE_URL/],

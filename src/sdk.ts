@@ -13,19 +13,20 @@ export function subscriptionResultAccount(result: StepResult): string | null {
   return subscriptionResultAccounts.get(result) ?? null;
 }
 
-export function subscriptionEnvironment(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+export function subscriptionEnvironment(source: NodeJS.ProcessEnv = process.env, configDir?: string): NodeJS.ProcessEnv {
   const result = {...source};
   for (const key of Object.keys(result)) {
     if (/^(ANTHROPIC_|OPENAI_|CODEX_API_KEY$|CHATGPT_ACCESS_TOKEN$|CHATGPT_AUTH_TOKEN$|CLAUDE_CODE_USE_|CLAUDE_CODE_OAUTH_TOKEN$|CLAUDECODE$|CLAUDE_CODE_SESSION_ID$)/.test(key)) delete result[key];
   }
+  if (configDir !== undefined) result.CLAUDE_CONFIG_DIR = configDir;
   result.CLAUDE_AGENT_SDK_CLIENT_APP = `codex-claude-models/${VERSION}`;
   // The pinned executable must stay the one the policy verified; only this child's environment changes.
   return pinnedEnvironment(result);
 }
 
-export function isolatedOptions(cwd: string): Options {
+export function isolatedOptions(cwd: string, configDir?: string): Options {
   return {
-    cwd, env: subscriptionEnvironment(), tools: [], settingSources: [], strictMcpConfig: true,
+    cwd, env: subscriptionEnvironment(process.env, configDir), tools: [], settingSources: [], strictMcpConfig: true,
     mcpServers: {}, plugins: [], persistSession: false, permissionMode: 'dontAsk', permissionPrompts: 'none',
     hooks: {PreToolUse: [{hooks: [async input => {
       if (input.hook_event_name === 'PreToolUse' && input.tool_name === 'StructuredOutput') return {};
@@ -53,6 +54,8 @@ export function usageFromModels(models: Record<string, ModelUsage>): Usage {
 export interface RuntimeOptions {
   runtimePolicyPath?: string;
   receiptsDir?: string;
+  configDir?: string;
+  expectedAccount?: string;
   // Module-test injection only. bridge-main never sets it, so production always runs the policy check.
   guard?: (context: {cwd: string; signal: AbortSignal}) => Promise<VerifiedRuntime>;
 }
@@ -62,7 +65,8 @@ function guardRuntime(cwd: string, runtime: RuntimeOptions, signal: AbortSignal)
   if (!runtime.runtimePolicyPath) {
     return Promise.reject(new BridgeError(503, 'runtime_policy_required', 'A private runtime policy is required before any Claude request. Create runtime-policy.json from runtime-policy.example.json.'));
   }
-  return verifyRuntime({policyPath: runtime.runtimePolicyPath, cwd, signal, childEnv: subscriptionEnvironment});
+  return verifyRuntime({policyPath: runtime.runtimePolicyPath, cwd, signal,
+    scan: {configDir: runtime.configDir}, childEnv: () => subscriptionEnvironment(process.env, runtime.configDir)});
 }
 
 // The loser of the race must never become an unhandled rejection.
@@ -86,6 +90,15 @@ function requireSubscription(account: {apiProvider?: string; subscriptionType?: 
   return plan;
 }
 
+function verifiedAccount(account: Parameters<typeof accountFingerprint>[0], runtime: RuntimeOptions) {
+  const fingerprint = accountFingerprint(account);
+  if (runtime.expectedAccount && fingerprint !== runtime.expectedAccount) {
+    throw new BridgeError(409, 'subscription_account_changed',
+      'The selected model belongs to a different Claude login. Sign in to its registered account or select the other account in the model picker.');
+  }
+  return fingerprint;
+}
+
 // The 30 s deadline bounds every step, including a guard, account or model request that never settles.
 export async function inspectSdk(cwd: string, runtime: RuntimeOptions = {}, queryImpl: typeof query = query) {
   let release!: () => void;
@@ -97,15 +110,16 @@ export async function inspectSdk(cwd: string, runtime: RuntimeOptions = {}, quer
   let closed = false;
   try {
     const verified = await raceAbort(guardRuntime(cwd, runtime, signal), signal);
-    session = queryImpl({prompt: (async function* () {await idle;})(), options: {...isolatedOptions(cwd), abortController,
+    session = queryImpl({prompt: (async function* () {await idle;})(), options: {...isolatedOptions(cwd, runtime.configDir), abortController,
       ...(verified.claudePath ? {pathToClaudeCodeExecutable: verified.claudePath} : {})}});
     const account = await raceAbort(session.accountInfo(), signal);
     const plan = subscriptionPlan(account);
     const guardCoverage = verified.coverage ?? GUARD_COVERAGE;
     // An account that is not a supported first-party subscription is reported before any model request is made.
-    if (!plan) return {authenticated: false, subscriptionType: null, models: [] as ClaudeModel[], guardCoverage};
+    if (!plan) return {authenticated: false, subscriptionType: null, accountId: null, models: [] as ClaudeModel[], guardCoverage};
+    const accountId = verifiedAccount(account, runtime);
     const models = discoverCatalog(await raceAbort(session.supportedModels(), signal));
-    return {authenticated: true, subscriptionType: plan, models, guardCoverage};
+    return {authenticated: true, subscriptionType: plan, accountId, models, guardCoverage};
   } finally {
     clearTimeout(timer); release();
     if (session && !closed) {
@@ -129,11 +143,11 @@ export async function inspectSubscriptionAccount(cwd: string, runtime: RuntimeOp
   let session: ReturnType<typeof query> | undefined;
   try {
     const verified = await raceAbort(guardRuntime(cwd, runtime, signal), signal);
-    session = queryImpl({prompt: (async function* () {await idle;})(), options: {...isolatedOptions(cwd), abortController,
+    session = queryImpl({prompt: (async function* () {await idle;})(), options: {...isolatedOptions(cwd, runtime.configDir), abortController,
       ...(verified.claudePath ? {pathToClaudeCodeExecutable: verified.claudePath} : {})}});
     const account = await raceAbort(session.accountInfo(), signal);
     requireSubscription(account);
-    return accountFingerprint(account);
+    return verifiedAccount(account, runtime);
   } finally {
     clearTimeout(timer); callerSignal?.removeEventListener('abort', abort); release();
     try {session?.close();} catch {/* closing is best effort */}
@@ -192,11 +206,12 @@ function resolveEffort(model: ClaudeModel, request: ResponsesRequest) {
   return requested as Options['effort'];
 }
 
-export function sdkRunner(cwd: string, models: ClaudeModel[], queryImpl: typeof query = query, runtime: RuntimeOptions = {}): RunStep {
+export function sdkRunner(cwd: string, models: ClaudeModel[], queryImpl: typeof query = query, baseRuntime: RuntimeOptions = {}): RunStep {
   return async (request: ResponsesRequest, signal: AbortSignal, progress: () => void = () => {}) => {
     // Client errors end here: an unknown model, unsupported input or effort is not an inference attempt and leaves no receipt.
     const model = models.find(m => m.id === request.model);
     if (!model) throw new BridgeError(400, 'unknown_model', 'Unknown Claude model. Run setup install to refresh the catalog.');
+    const runtime = model.account ? {...baseRuntime, configDir: model.account.configDir, expectedAccount: model.account.fingerprint} : baseRuntime;
     const prepared = preparePrompt(request);
     const effort = resolveEffort(model, request);
 
@@ -215,6 +230,7 @@ export function sdkRunner(cwd: string, models: ClaudeModel[], queryImpl: typeof 
     let final: Record<string, unknown> | undefined;
     let context: ContextUsage | undefined;
     let result: StepResult | undefined, failure: unknown;
+    let observedAccount: string | null = null;
     let attempts = 0, rejected: Record<string, unknown> | undefined;
     let lastEvent: string | undefined, lastEventClock: number | undefined;
     const closeSession = () => {
@@ -241,7 +257,7 @@ export function sdkRunner(cwd: string, models: ClaudeModel[], queryImpl: typeof 
       })(), options});
       const account = await raceAbort(session.accountInfo(), abortController.signal);
       requireSubscription(account);
-      const accountId = accountFingerprint(account);
+      const accountId = observedAccount = verifiedAccount(account, runtime);
       permitted = true; stage = 'prompt_released'; releasedClock ??= performance.now(); release();
       const iterator = session[Symbol.asyncIterator]();
       for (;;) {
@@ -285,7 +301,7 @@ export function sdkRunner(cwd: string, models: ClaudeModel[], queryImpl: typeof 
     try {
       verified = await raceAbort(guardRuntime(cwd, runtime, abortController.signal), abortController.signal);
       if (!runtime.receiptsDir) throw new BridgeError(503, 'receipts_required', 'A private receipts directory is required before any Claude request.');
-      const options: Options = {...isolatedOptions(cwd), model: model.sdkModel, systemPrompt: `${NATIVE_PROVIDER_INSTRUCTION}\n\n${prepared.system}`,
+      const options: Options = {...isolatedOptions(cwd, runtime.configDir), model: model.sdkModel, systemPrompt: `${NATIVE_PROVIDER_INSTRUCTION}\n\n${prepared.system}`,
         // Successful receipts report num_turns up to 5 with tools disabled; 8 leaves headroom before error_max_turns.
         abortController, maxTurns: 8, includePartialMessages: true, outputFormat: {type: 'json_schema', schema: outputSchemaFor(request)},
         ...(verified.claudePath ? {pathToClaudeCodeExecutable: verified.claudePath} : {}), ...(effort ? {effort} : {})};
@@ -322,6 +338,8 @@ export function sdkRunner(cwd: string, models: ClaudeModel[], queryImpl: typeof 
         preflight_ms: releasedClock === undefined ? null : Math.round(releasedClock - startedClock),
         query_ms: releasedClock === undefined ? null : Math.round(endClock - releasedClock),
         inference_stage: stage, requested_alias: model.sdkModel, requested_effort: effort ?? null,
+        ...(model.account ? {requested_model_id: model.id, subscription_account_id: model.account.id,
+          subscription_account_fingerprint: observedAccount} : {}),
         effective_effort: 'unknown', ...summarizeFinal(final), status, code: safeCode(code),
         usage_scope: 'query_pipeline_total', context_usage: context ? {model: context.model, source: context.source, usage: {
           input_tokens: context.usage.input_tokens, cached_input_tokens: context.usage.input_tokens_details.cached_tokens,

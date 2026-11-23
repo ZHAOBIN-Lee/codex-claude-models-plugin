@@ -26,6 +26,9 @@ export interface Receipt {
   query_ms: number | null;
   inference_stage: InferenceStage;
   requested_alias: string;
+  requested_model_id?: string;
+  subscription_account_id?: string;
+  subscription_account_fingerprint?: string | null;
   requested_effort: string | null;
   effective_effort: 'unknown';
   actual_models: string[];

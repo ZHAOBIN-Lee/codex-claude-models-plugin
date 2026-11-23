@@ -1,12 +1,17 @@
 import type { ModelInfo } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
+import type {SubscriptionAccount} from './subscription-accounts.js';
 
 export const openaiCatalogSchema = z.object({models: z.array(z.object({
   slug: z.string().min(1), priority: z.number().optional(),
 }).passthrough()).min(1)}).passthrough();
 export type OpenAICatalog = z.infer<typeof openaiCatalogSchema>;
 
-export interface ClaudeModel { id: string; sdkModel: string; resolvedModel?: string; displayName: string; description: string; efforts: string[] }
+export interface ClaudeModel {
+  id: string; sdkModel: string; resolvedModel?: string; displayName: string; description: string; efforts: string[];
+  account?: SubscriptionAccount;
+  hidden?: boolean;
+}
 export function discoverCatalog(models: ModelInfo[]): ClaudeModel[] {
   return models.filter(m => m.value !== 'default').map(m => ({
     id: `claude-sdk-${m.value.replaceAll(/[^a-zA-Z0-9-]/g, '-').replaceAll(/-+$/g, '')}`,
@@ -55,7 +60,7 @@ export function codexCatalog(models: ClaudeModel[]) {
     slug: m.id, display_name: m.displayName, description: `${m.description} · Claude Agent SDK`,
     default_reasoning_level: m.efforts.includes('medium') ? 'medium' : 'none',
     supported_reasoning_levels: (m.efforts.length ? m.efforts : ['none']).map(effort => ({effort, description: `${effort} effort`})),
-    shell_type: 'unified_exec', visibility: 'list', supported_in_api: true, priority: i,
+    shell_type: 'unified_exec', visibility: m.hidden ? 'hide' : 'list', supported_in_api: true, priority: i,
     base_instructions: 'You are a coding assistant in Codex. Follow the user and developer instructions. Use the provided Codex tools to inspect, edit and verify work. Never claim an action happened without its tool result.',
     availability_nux: null, upgrade: null, support_verbosity: false, default_verbosity: null,
     apply_patch_tool_type: 'freeform', truncation_policy: {mode: 'bytes', limit: 20000},
